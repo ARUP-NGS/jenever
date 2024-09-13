@@ -101,8 +101,17 @@ class ReadEncoder:
         self.window_end = new_end
         return encoded
 
+    def _find_start(self, start):
+        """ Use bisect library to find entry in aligned pairs that corresponds to the start of the window """
+        idx = bisect.bisect_left(self.alnpairs, start, key=lambda x: x[1])  # Including the key function here restricts everything to python >=3.10
+        return self.alnpairs[idx]
+
     def _from_scratch(self, ref_start, ref_end):
-        first_base_to_encode, first_base_ref_coord = find_start(self.alnpairs, ref_start)
+        """
+        Discard existing information and re-encode the read from scratch
+        :return: Encoded tensor representing the read in the given reference window
+        """
+        first_base_to_encode, first_base_ref_coord = self._find_start(ref_start)
         encoded = encode_read(self.read,
                               prepad=first_base_ref_coord - ref_start,
                               tot_length=ref_end - ref_start, # Includes prepad bases, so always equal to full window length
@@ -124,20 +133,17 @@ class ReadEncoder:
         :param ref_end: Reference coordinate of the end of the window
         :return: Encoded tensor
         """
-        if self.encoded_chunk is None:
-            return self._from_scratch(ref_start, ref_end)
-        elif self.window_start < ref_start < self.window_end:
-            return self.shift(ref_start, ref_end)
-        else:
-            return self._from_scratch(ref_start, ref_end)
+        # TODO This is problematic because the first call from _from_scratch involves finding the 'anchor' position for the read, but the more
+        # windows we generate via 'shift' operations the more that anchor becomes shifted and inaccurate due to indels in the read
+        # So we need to find a way to re-anchor the read to the reference sequence at some point
+        return self._from_scratch(ref_start, ref_end)
 
-
-
-
-def find_start(alnpairs, start):
-    """ Use bisect library to find entry in aligned pairs that corresponds to the start of the window """
-    idx = bisect.bisect_left(alnpairs, start, key=lambda x: x[1]) # Including the key function here restricts everything to python >=3.10
-    return alnpairs[idx]
+        # if self.encoded_chunk is None:
+        #     return self._from_scratch(ref_start, ref_end)
+        # elif self.window_start < ref_start < self.window_end:
+        #     return self.shift(ref_start, ref_end)
+        # else:
+        #     return self._from_scratch(ref_start, ref_end)
 
 
 def get_mapping_coords(window_start: int, window_end: int, read_length: int, read_idx_anchor: int, ref_idx_anchor: int) -> Tuple[int, int, int]:
