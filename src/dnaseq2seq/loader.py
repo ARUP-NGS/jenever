@@ -313,3 +313,19 @@ class PregenLoader:
         for result in iterate_dir(self.device, self.pathpairs, batch_size, self.max_decomped, self.threads):
             yield result
 
+
+class ReadShuffleLoader:
+
+    def __init__(self, loader):
+        self.loader = loader
+
+    def iter_once(self, batch_size):
+        for src, tgt, *_, in self.loader.iter_once(batch_size):
+            # Permute the entries in dimension 1 of the src tensor, but don't change the special element at index 0
+            # This is fast but naive - each element of the batch is permuted the exact same way
+            perm = (torch.randperm(src.size(1)-1) + 1)
+            z = torch.zeros(1).int()
+            idx = torch.cat((z, perm))
+            src = src[:, idx, :, :]
+
+            yield src, tgt, *_
