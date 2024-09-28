@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jenever"
-version = "1.3.0"  # Replace with the actual parsed version
+version = "1.3.1"  # Replace with the actual parsed version
 description = "Variant caller for next-generation sequencing data using generative haplotype prediction"
 readme = "README.md"
 requires-python = ">=3.10"
