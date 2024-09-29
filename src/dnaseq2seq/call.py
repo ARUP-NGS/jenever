@@ -6,7 +6,9 @@ import datetime
 import logging
 import string
 import random
+import traceback
 from collections import defaultdict
+
 from functools import partial
 from pathlib import Path
 from typing import List, Callable
@@ -24,6 +26,7 @@ from dnaseq2seq import buildclf
 from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
+
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +54,6 @@ class CallingStopSignal:
         self.sus_region_count = sus_region_count
         self.sus_region_bp = sus_region_bp
 
-class CallingErrorSignal:
-
-    def __init__(self, errormsg):
-        self.err = errormsg
 
 class IndexedRegion:
 
@@ -249,6 +248,20 @@ def region_priority(region_data: dict, chrom_order: List[str]) -> int:
     return int(1e9 * idx + start)
 
 
+def worker_wrapper(func, callstate, *args, **kwargs):
+    """
+    Wrap a function with a try-catch block that sets an exception in the callstate dict
+    """
+    try:
+        return func(*args, **kwargs)
+    except Exception as ex:
+        funcname = getattr(func, '__name__', 'unknown')
+        logger.error(f"Caught exception in wrapped function {funcname}: {ex}")
+        callstate['exception'] = ex
+        callstate['traceback'] = traceback.format_exc()
+        raise ex
+
+
 def call_vars_in_parallel(
     bampath, bed, refpath, model_path, classifier_path, threads, max_batch_size, vcf_out, vcf_header_extras, show_progress,
 ):
@@ -276,25 +289,25 @@ def call_vars_in_parallel(
     priority_func = partial(region_priority, chrom_order=bed_chrom_order)
     progress_tracker = util.RegionProgressCounter(bed)
 
-
     with mp.Manager() as manager:
         callstate = manager.dict()
         callstate['exception'] = None
         callstate['region_keepalive'] = True
 
         # This one processes the input BED file and find 'suspect regions', and puts them in the regions_queue
-        region_finder = mp.Process(target=find_regions, args=(regions_queue, bed, bampath, refpath, threads, show_progress))
+        region_finder = mp.Process(target=worker_wrapper,
+                                   args=(find_regions, callstate, regions_queue, bed, bampath, refpath, threads, show_progress, callstate))
         region_finder.start()
 
-        region_workers = [mp.Process(target=generate_tensors,
-                                     args=(regions_queue, tensors_queue, bampath, refpath, callstate))
+        region_workers = [mp.Process(target=worker_wrapper,
+                                     args=(generate_tensors, callstate, regions_queue, tensors_queue, bampath, refpath, callstate))
                           for _ in range(threads)]
 
         for p in region_workers:
             p.start()
 
-        model_proc = mp.Process(target=accumulate_regions_and_call,
-                                args=(model_path, tensors_queue, priority_func, refpath, bampath, classifier_path, max_batch_size, vcf_out, vcf_header_extras, threads, callstate, progress_tracker, show_progress))
+        model_proc = mp.Process(target=worker_wrapper,
+                                args=(accumulate_regions_and_call, callstate, model_path, tensors_queue, priority_func, refpath, bampath, classifier_path, max_batch_size, vcf_out, vcf_header_extras, threads, callstate, progress_tracker, show_progress))
         model_proc.start()
 
         region_finder.join()
@@ -311,7 +324,7 @@ def call_vars_in_parallel(
             raise callstate['exception']
 
 
-def find_regions(regionq, inputbed, bampath, refpath, n_signals, show_progress):
+def find_regions(regionq, inputbed, bampath, refpath, n_signals, show_progress, callstate):
     """
     Read the input BED formatted file and merge / split the regions into big chunks
     Then find regions that may contain a variant, and add all of these
@@ -420,18 +433,14 @@ def generate_tensors(region_queue: mp.Queue, output_queue: mp.Queue, bampath, re
             output_queue.put(CallingStopSignal(regions_submitted=encoded_region_count, sus_region_count=region.tot_sus_regions, sus_region_bp=region.tot_sus_bp))
             break
         else:
-            try:
-                reg = (region.chrom, region.start, region.end)
-                data = encode_region(bampath, refpath, region, max_read_depth, window_size, min_reads, batch_size=batch_size, window_step=window_step)
-                if data is not None:
-                    data['encoded_pileup'].share_memory_()
-                    encoded_region_count += 1
-                    output_queue.put(data)
 
-            except Exception as ex:
-                logger.error(f"Exception in region worker: {ex}")
-                callstate['exception'] = ex
-                raise ex
+            reg = (region.chrom, region.start, region.end)
+            data = encode_region(bampath, refpath, region, max_read_depth, window_size, min_reads, batch_size=batch_size, window_step=window_step)
+            if data is not None:
+                data['encoded_pileup'].share_memory_()
+                encoded_region_count += 1
+                output_queue.put(data)
+
     
     # It is CRITICAL to keep these processes alive, even after they're done doing everything. Pytorch will clean up the 
     # the tensors *that have already been queued* when these processes die, even if the tensors haven't been processed yet
@@ -562,12 +571,7 @@ def accumulate_regions_and_call(modelpath: str,
             logger.debug(f"Got a timeout in model queue, have {timeouts} total")
         except Exception as ex:
             logger.error(f"Exception polling calling input queue: {ex}")
-            callstate['exception'] = ex
             raise ex
-
-        if isinstance(data, CallingErrorSignal):
-            logger.error(f"Calling worker discovered an error token: {data.err}, we are shutting down")
-            break
 
         if timeouts == max_consecutive_timeouts:
             logger.error(f"Found {max_consecutive_timeouts} timeouts, aborting model processing queue")
