@@ -417,6 +417,8 @@ def predict_sequence(src, model, n_output_toks, device):
     predictions = torch.stack((START_TOKEN, START_TOKEN), dim=0).expand(src.shape[0], -1, -1, -1).float().to(device)
     probs = torch.zeros(src.shape[0], 2, 1).float().to(device)
     mem = model.encode(src)
+    tn_pred_logits = model.tn_cls_head(mem[:, 0, :])
+
     encode = time.perf_counter()
     encode_elapsed = encode - start
     step_time = time.perf_counter()
@@ -431,7 +433,7 @@ def predict_sequence(src, model, n_output_toks, device):
         step_time = time.perf_counter()
     decode_elapsed = time.perf_counter() - encode
     logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
-    return predictions[:, :, 1:, :], probs[:, :, 1:]
+    return predictions[:, :, 1:, :], probs[:, :, 1:], tn_pred_logits
 
 
 class VariantSortedBuffer:

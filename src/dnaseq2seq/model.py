@@ -131,6 +131,13 @@ class VarTransformer(nn.Module):
         self.pos_encoder = PositionalEncoding2D(self.fc1_hidden, self.device)
         self.tgt_pos_encoder = PositionalEncoding(self.kmer_dim, batch_first=True, max_len=500).to(self.device)
 
+        # No need for sigmoid here since we're using BCEWithLogitsLoss which combines sigmoid and BCELoss
+        self.tn_cls_head = nn.Sequential(
+            nn.Linear(self.embed_dim, 128),
+            nn.GELU(),
+            nn.Linear(128, 1),
+        )
+
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=self.embed_dim,
             nhead=encoder_attention_heads,
@@ -179,5 +186,8 @@ class VarTransformer(nn.Module):
     def forward(self, src, tgt, tgt_mask, tgt_key_padding_mask=None):
         mem = self.encode(src)
         result = self.decode(mem, tgt, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
-        return result
+
+        tn_prediction = self.tn_cls_head(mem[:, 0, :])
+
+        return result, tn_prediction
 
