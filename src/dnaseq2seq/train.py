@@ -90,20 +90,9 @@ def compute_twohap_loss(preds, tgt, criterion):
     then swap haplotypes (dimension index 1) in the predictions if that leads to a lower loss
     Finally, re-compute loss with the new configuration for all samples and return it, storing gradients this time
     """
-    # Compute losses in both configurations, and use the best
-    with torch.no_grad():
-        swaps = 0
-        for b in range(preds.shape[0]):
-            loss1 = criterion(preds[b, :, :, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, :, :].flatten())
-            loss2 = criterion(preds[b, :, :, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, torch.tensor([1, 0]), :].flatten())
-
-            if loss2.mean() < loss1.mean():
-                preds[b, :, :, :] = preds[b, torch.tensor([1, 0]), :]
-                swaps += 1
-
-    return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
+    loss1 = criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten())
+    loss2 = criterion(preds.flatten(start_dim=0, end_dim=2), tgt[:, torch.tensor([1, 0]), :].flatten())
+    return (loss1 + loss2) / 2.0, 0
 
 
 def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
@@ -349,8 +338,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
