@@ -634,6 +634,10 @@ def train(output_model, **kwargs):
                                      max_decomped_batches=kwargs.get('max_decomp_batches'),
                                      tgt_prefix="tgkmers")
 
+    if kwargs.get('shuffle'):
+        logger.info("Shuffling read dimension of training data")
+        dataloader = loader.ReadShuffleLoader(dataloader)
+
     if kwargs.get('input_model'):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
     else:
