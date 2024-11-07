@@ -304,61 +304,6 @@ def safe_compute_ppav(results0, results1, key):
     return ppa, ppv
 
 def load_model(modelconf, ckpt):
-    # 35M model params
-    # encoder_attention_heads = 8 # was 4
-    # decoder_attention_heads = 4 # was 4
-    # dim_feedforward = 512
-    # encoder_layers = 6
-    # decoder_layers = 4 # was 2
-    # embed_dim_factor = 100 # was 100
-
-    # 50M model params
-    # encoder_attention_heads = 8 # was 4
-    # decoder_attention_heads = 4 # was 4
-    # dim_feedforward = 512
-    # encoder_layers = 8
-    # decoder_layers = 6 # was 2
-    # embed_dim_factor = 120 # was 100
-
-    # Wider model
-    # encoder_attention_heads = 4 # was 4
-    # decoder_attention_heads = 4 # was 4
-    # dim_feedforward = 1024
-    # encoder_layers = 6
-    # decoder_layers = 6 # was 2
-    # embed_dim_factor = 200 # was 100
-
-    # 100M params
-    # encoder_attention_heads = 8  # was 4
-    # decoder_attention_heads = 10  # was 4
-    # dim_feedforward = 512
-    # encoder_layers = 10
-    # decoder_layers = 10  # was 2
-    # embed_dim_factor = 160  # was 100
-
-    # 200M params
-    # encoder_attention_heads = 12 # was 4
-    # decoder_attention_heads = 13 # Must evenly divide 260
-    # dim_feedforward = 1024
-    # encoder_layers = 10
-    # decoder_layers = 10 # was 2
-    # embed_dim_factor = 160 # was 100
-
-    # More layers but less model dim
-    # encoder_attention_heads = 10 # was 4
-    # decoder_attention_heads = 10 # Must evenly divide 260
-    # dim_feedforward = 1024
-    # encoder_layers = 14
-    # decoder_layers = 14 # was 2
-    # embed_dim_factor = 160 # was 100
-
-    # Small, for testing params
-    # encoder_attention_heads = 2  # was 4
-    # decoder_attention_heads = 2  # was 4
-    # dim_feedforward = 512
-    # encoder_layers = 2
-    # decoder_layers = 2  # was 2
-    # embed_dim_factor = 160  # was 100
     statedict = None
     if ckpt is not None:
         if 'model' in ckpt:
@@ -598,6 +543,9 @@ def train(output_model, **kwargs):
     """
 
     kwargs = load_conf(kwargs.get('config'), **kwargs)
+    if experiment:
+        experiment.log_parameters(kwargs)
+
     run_name = kwargs.get("run_name", "training_run")
     dest = f"{run_name}_training_conf.yaml"
     with open(dest, "w") as fh:
