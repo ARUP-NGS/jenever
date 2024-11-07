@@ -113,6 +113,7 @@ class VarTransformer(nn.Module):
                  embed_dim_factor,
                  n_encoder_layers,
                  n_decoder_layers,
+                 decoder_embed_dim,
                  p_dropout=0.1,
                  device='cpu'):
         super().__init__()
@@ -121,13 +122,14 @@ class VarTransformer(nn.Module):
         self.device = device
         self.read_depth = read_depth
         self.kmer_dim = kmer_dim
+        self.decoder_embed_dim = decoder_embed_dim
         self.embed_dim = encoder_attention_heads * embed_dim_factor
         self.fc1_hidden = 12
 
         self.fc1 = nn.Linear(feature_count, self.fc1_hidden)
         self.fc2 = nn.Linear(self.read_depth * self.fc1_hidden, self.embed_dim)
 
-        self.converter = nn.Linear(self.embed_dim, self.kmer_dim)
+        self.converter = nn.Linear(self.embed_dim, self.decoder_embed_dim)
         self.pos_encoder = PositionalEncoding2D(self.fc1_hidden, self.device)
         self.tgt_pos_encoder = PositionalEncoding(self.kmer_dim, batch_first=True, max_len=500).to(self.device)
 
@@ -141,14 +143,19 @@ class VarTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layers, num_layers=n_encoder_layers)
 
         decoder_layers = nn.TransformerDecoderLayer(
-            d_model=self.kmer_dim,
+            d_model=self.decoder_embed_dim,
             nhead=decoder_attention_heads,
             dim_feedforward=d_ff,
             dropout=p_dropout,
             batch_first=True,
             activation='gelu')
+
+        self.tgt_input_converter = nn.Linear(self.kmer_dim, self.decoder_embed_dim)
         self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
         self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
+        self.decode_output_converter0 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
+        self.decode_output_converter1 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
+
         self.softmax = nn.LogSoftmax(dim=-1)
         self.elu = torch.nn.ELU()
 
@@ -165,6 +172,9 @@ class VarTransformer(nn.Module):
         tgt0 = self.tgt_pos_encoder(tgt[:, 0, :, :])
         tgt1 = self.tgt_pos_encoder(tgt[:, 1, :, :])
 
+        tgt0 = self.tgt_input_converter(tgt0)
+        tgt1 = self.tgt_input_converter(tgt1)
+
         # The magic of DataParallel mistakenly modifies the first dimension of the tgt mask when running on multi-GPU setups
         # This hack just forces it to be a square again
         if tgt_mask.shape[0] != tgt_mask.shape[1]:
@@ -172,6 +182,10 @@ class VarTransformer(nn.Module):
             #logger.info(f"Forcing tgt mask shapre to be {tgt_mask.shape}, input enc shape is: {mem.shape}")
         h0 = self.decoder0(tgt0, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
         h1 = self.decoder1(tgt1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+
+        h0 = self.decode_output_converter0(h0)
+        h1 = self.decode_output_converter1(h1)
+
         h0 = self.softmax(h0)
         h1 = self.softmax(h1)
         return torch.stack((h0, h1), dim=1)

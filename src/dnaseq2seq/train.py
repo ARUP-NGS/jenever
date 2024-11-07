@@ -328,6 +328,7 @@ def load_model(modelconf, ckpt):
                            embed_dim_factor=modelconf['embed_dim_factor'],
                            encoder_attention_heads=modelconf['encoder_attention_heads'],
                            decoder_attention_heads=modelconf['decoder_attention_heads'],
+                            decoder_embed_dim=modelconf['decoder_embed_dim'],
                            d_ff=modelconf['dim_feedforward'],
                            device=DEVICE)
 
@@ -349,8 +350,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
