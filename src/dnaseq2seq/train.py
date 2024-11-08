@@ -350,8 +350,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    # logger.info("Compiling model...")
-    # model = torch.compile(model)
+    logger.info("Compiling model...")
+    model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
