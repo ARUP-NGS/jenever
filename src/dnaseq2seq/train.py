@@ -302,6 +302,35 @@ def safe_compute_ppav(results0, results1, key):
 
     return ppa, ppv
 
+def load_fix_encoder(model, ckpt):
+    ckpt = torch.load(ckpt, map_location=DEVICE)
+    statedict = ckpt['model']
+    new_state_dict = {}
+    for key in statedict.keys():
+        new_key = key.replace('_orig_mod.', '')
+        new_state_dict[new_key] = statedict[key]
+    statedict = new_state_dict
+
+    encoder_state_dict = {k: v for k, v in statedict.items() if k.startswith("encoder.")}
+    fc1_state_dict = {k: v for k, v in statedict.items() if k.startswith("fc1.")}
+    fc2_state_dict = {k: v for k, v in statedict.items() if k.startswith("fc2.")}
+
+    model.encoder.load_state_dict(encoder_state_dict, strict=False)
+    model.fc1.load_state_dict(fc1_state_dict, strict=False)
+    model.fc2.load_state_dict(fc2_state_dict, strict=False)
+
+    for param in model.encoder.parameters():
+        param.requires_grad = False
+
+    for param in model.fc1.parameters():
+        param.requires_grad = False
+
+    for param in model.fc2.parameters():
+        param.requires_grad = False
+
+    return model
+
+
 def load_model(modelconf, ckpt):
     statedict = None
     if ckpt is not None:
@@ -593,6 +622,9 @@ def train(output_model, **kwargs):
     else:
         ckpt = None
     model = load_model(kwargs['model'], ckpt)
+
+    if kwargs.get('model_encoder_fix'):
+        model = load_fix_encoder(model, kwargs['model_encoder_fix'])
 
     model_tot_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model total parameter count: {model_tot_params}")
