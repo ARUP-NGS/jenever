@@ -394,6 +394,7 @@ def load_model(modelconf, ckpt):
     model.train()
     return model
 
+
 def train_epochs(model,
                  optimizer,
                  epochs,
@@ -443,6 +444,8 @@ def train_epochs(model,
                               scheduler)
 
             elapsed = datetime.now() - starttime
+
+            dist.barrier()
 
             if MASTER_PROCESS:
                 acc0, acc1, var_count0, var_count1, results0, results1, val_loss, swaps = calc_val_accuracy(val_loader, model, criterion)
@@ -498,7 +501,7 @@ def train_epochs(model,
                     'opt': optimizer.state_dict(),
                 }
                 torch.save(ckpt_data, checkpoint_name)
-
+            dist.barrier()
         logger.info(f"Training completed after {epoch} epochs")
     except KeyboardInterrupt:
         pass
@@ -624,10 +627,16 @@ def train(output_model, **kwargs):
     model = load_model(kwargs['model'], ckpt)
 
     if kwargs.get('model_encoder_fix'):
-        model = load_fix_encoder(model, kwargs['model_encoder_fix'])
+        logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
+        if hasattr(model, 'module'):
+            model_unwrapped = model.module
+        else:
+            model_unwrapped = model
+        model = load_fix_encoder(model_unwrapped, kwargs['model_encoder_fix'])
 
-    model_tot_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Model total parameter count: {model_tot_params}")
+    model_tot_params = sum(p.numel() for p in model.parameters())
+    model_trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Model total parameter count: {model_tot_params}, trainable params: {model_trainable_params}")
     if experiment:
         set_comet_conf(model_tot_params, **kwargs)
 
