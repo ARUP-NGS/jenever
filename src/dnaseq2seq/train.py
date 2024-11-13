@@ -14,7 +14,6 @@ from torch import nn
 import torch.distributed as dist
 from torch.cuda.amp import GradScaler
 import torch.cuda.amp as amp
-
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
@@ -22,6 +21,7 @@ from dnaseq2seq import vcf
 from dnaseq2seq import loader
 from dnaseq2seq import util
 from dnaseq2seq.model import VarTransformer
+from dnaseq2seq import loggers
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
 formatter = logging.Formatter(LOG_FORMAT)
@@ -52,37 +52,6 @@ else:
 
 
 
-class TrainLogger:
-    """ Simple utility for writing various items to a log file CSV """
-
-    def __init__(self, output, headers):
-        self.headers = list(headers)
-        if type(output) == str:
-            self.output = open(output, "a")
-        else:
-            self.output = output
-        self._write_header()
-
-
-    def _write_header(self):
-        self.output.write(",".join(self.headers) + "\n")
-        self._flush_and_fsync()
-
-    def _flush_and_fsync(self):
-        try:
-            self.output.flush()
-            os.fsync()
-        except:
-            pass
-
-    def log(self, items):
-        assert len(items) == len(self.headers), f"Expected {len(self.headers)} items to log, but got {len(items)}"
-        self.output.write(
-            ",".join(str(items[k]) for k in self.headers) + "\n"
-        )
-        self._flush_and_fsync()
-
-
 
 def compute_twohap_loss(preds, tgt, criterion):
     """
@@ -105,6 +74,17 @@ def compute_twohap_loss(preds, tgt, criterion):
 
     return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
 
+def compute_gradient_norm(layer):
+    """
+    Compute the 2-norm of the gradients of all parameters in the layer
+    """
+    total_norm = 0.0
+    for p in layer.parameters():
+        if p.grad is not None:
+            param_norm = p.grad.detach().data.norm(2)  # 2-norm (Euclidean norm)
+            total_norm += param_norm.item() ** 2
+    return total_norm ** 0.5
+
 
 def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
     """
@@ -116,6 +96,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     scaler = GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
+    gradnorms = defaultdict(list)
     for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
@@ -133,6 +114,10 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
 
         scaler.scale(loss).backward()
+        for name, layer in model.named_parameters():
+            norm = compute_gradient_norm(layer)
+            gradnorms[name].append(norm)
+
         loss_sum += loss.item()
         #torch.nn.utils.clip_grad_norm_(model.parameters(),  1.0)
         
@@ -379,8 +364,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
@@ -415,7 +400,7 @@ def train_epochs(model,
     logger.info(f"Training log data will be saved at {trainlogpath}")
 
     swaps = 0
-    trainlogger = TrainLogger(trainlogpath, [
+    trainlogger = loggers.TrainLogger(trainlogpath, [
             "epoch", "trainingloss", "val_accuracy",
             "mean_var_count", "ppa_dels", "ppa_ins", "ppa_snv",
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
@@ -430,6 +415,8 @@ def train_epochs(model,
         valpaths = dataloader.retain_val_samples(fraction=0.05)
         val_loader = loader.PregenLoader(device=DEVICE, datadir=None, pathpairs=valpaths, threads=4, tgt_prefix="tgkmers")
         logger.info(f"Pulled {len(valpaths)} samples to use for validation")
+
+    gradlogger = loggers.GradientMonitor(model, window_size=100)
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
@@ -489,6 +476,9 @@ def train_epochs(model,
                     "hap_swaps": swaps,
                     "epochtime": elapsed.total_seconds(),
                 }, step=epoch)
+
+                for layer in gradlogger.keys():
+                    experiment.log_histogram_3d(gradlogger.moving_averages[layer], step=epoch, name=layer)
 
             if MASTER_PROCESS and epoch > -1 and checkpoint_freq > 0 and (epoch % checkpoint_freq == 0):
                 modelparts = str(model_dest).rsplit(".", maxsplit=1)

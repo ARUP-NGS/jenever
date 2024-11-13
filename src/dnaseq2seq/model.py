@@ -131,7 +131,7 @@ class VarTransformer(nn.Module):
 
         self.converter = nn.Linear(self.embed_dim, self.decoder_embed_dim)
         self.pos_encoder = PositionalEncoding2D(self.fc1_hidden, self.device)
-        self.tgt_pos_encoder = PositionalEncoding(self.kmer_dim, batch_first=True, max_len=500).to(self.device)
+        self.tgt_pos_encoder = PositionalEncoding(self.decoder_embed_dim, batch_first=True, max_len=256).to(self.device)
 
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=self.embed_dim,
@@ -169,11 +169,13 @@ class VarTransformer(nn.Module):
 
     def decode(self, mem, tgt, tgt_mask, tgt_key_padding_mask=None):
         mem_proj = self.converter(mem)
-        tgt0 = self.tgt_pos_encoder(tgt[:, 0, :, :])
-        tgt1 = self.tgt_pos_encoder(tgt[:, 1, :, :])
 
-        tgt0 = self.tgt_input_converter(tgt0)
-        tgt1 = self.tgt_input_converter(tgt1)
+        # Convert to decoder embedding (model dimension) size
+        tgt0 = self.tgt_input_converter(tgt[:, 0, :, :])
+        tgt1 = self.tgt_input_converter(tgt[:, 1, :, :])
+
+        tgt0 = self.tgt_pos_encoder(tgt0)
+        tgt1 = self.tgt_pos_encoder(tgt1)
 
         # The magic of DataParallel mistakenly modifies the first dimension of the tgt mask when running on multi-GPU setups
         # This hack just forces it to be a square again
@@ -192,6 +194,6 @@ class VarTransformer(nn.Module):
 
     def forward(self, src, tgt, tgt_mask, tgt_key_padding_mask=None):
         mem = self.encode(src)
-        result = self.decode(mem, tgt, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+        result = self.decode(mem, tgt.float(), tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
         return result
 
