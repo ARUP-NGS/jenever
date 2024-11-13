@@ -74,16 +74,6 @@ def compute_twohap_loss(preds, tgt, criterion):
 
     return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
 
-def compute_gradient_norm(layer):
-    """
-    Compute the 2-norm of the gradients of all parameters in the layer
-    """
-    total_norm = 0.0
-    for p in layer.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.detach().data.norm(2)  # 2-norm (Euclidean norm)
-            total_norm += param_norm.item() ** 2
-    return total_norm ** 0.5
 
 
 def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
@@ -96,7 +86,6 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     scaler = GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
-    gradnorms = defaultdict(list)
     for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
@@ -114,9 +103,6 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
 
         scaler.scale(loss).backward()
-        for name, layer in model.named_parameters():
-            norm = compute_gradient_norm(layer)
-            gradnorms[name].append(norm)
 
         loss_sum += loss.item()
         #torch.nn.utils.clip_grad_norm_(model.parameters(),  1.0)
@@ -478,7 +464,7 @@ def train_epochs(model,
                 }, step=epoch)
 
                 for layer in gradlogger.keys():
-                    experiment.log_histogram_3d(gradlogger.moving_averages[layer], step=epoch, name=layer)
+                    experiment.log_histogram_3d(gradlogger.moving_averages[layer]['norm'], step=epoch, epoch=epoch, name=layer)
 
             if MASTER_PROCESS and epoch > -1 and checkpoint_freq > 0 and (epoch % checkpoint_freq == 0):
                 modelparts = str(model_dest).rsplit(".", maxsplit=1)

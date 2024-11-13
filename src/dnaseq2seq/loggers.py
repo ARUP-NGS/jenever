@@ -61,7 +61,7 @@ class GradientMonitor:
         for name, param in model.named_parameters():
             if param.requires_grad:
                 handle = param.register_hook(
-                    lambda grad, name: self._grad_hook(grad, name)
+                    lambda grad, name=name: self._grad_hook(grad, name)
                 )
                 self.handles.append(handle)
 
