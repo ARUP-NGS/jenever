@@ -108,7 +108,6 @@ def gen_suspicious_spots(bamfile, chrom, start, stop, reference_fasta):
                     break
 
 
-
 def load_model(model_path):
     """
     Create the VariantTransformer model using params / config settings from the given path
@@ -124,18 +123,20 @@ def load_model(model_path):
       new_state_dict[new_key] = statedict[key]
     statedict = new_state_dict
 
+    logger.info(f"Loading model configuration: {modelconf}")
     model = VarTransformer(read_depth=modelconf['max_read_depth'],
                            feature_count=modelconf['feats_per_read'],
                            kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
                            n_encoder_layers=modelconf['encoder_layers'],
                            n_decoder_layers=modelconf['decoder_layers'],
                            embed_dim_factor=modelconf['embed_dim_factor'],
+                           decoder_embed_dim=modelconf['decoder_embed_dim'],
                            encoder_attention_heads=modelconf['encoder_attention_heads'],
                            decoder_attention_heads=modelconf['decoder_attention_heads'],
                            d_ff=modelconf['dim_feedforward'],
                            device=DEVICE)
 
-    model.load_state_dict(statedict)
+    model.load_state_dict(statedict, strict=False)
     model.eval()
     model.to(DEVICE)
     

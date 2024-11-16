@@ -350,8 +350,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    # logger.info("Compiling model...")
-    # model = torch.compile(model)
+    logger.info("Compiling model...")
+    model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
@@ -414,7 +414,8 @@ def train_epochs(model,
                               criterion,
                               sample_iter,
                               samples_per_epoch,
-                              scheduler)
+                              scheduler,
+                              enable_amp=True)
 
             elapsed = datetime.now() - starttime
 
@@ -464,6 +465,9 @@ def train_epochs(model,
                 }, step=epoch)
 
                 for layer in gradlogger.keys():
+                    logger.info(f"Logging histogram for {layer} step: {epoch}")
+                    if "fc1" in layer:
+                        logger.info(f"FC1 vals: {gradlogger.moving_averages[layer]['norm']}")
                     experiment.log_histogram_3d(gradlogger.moving_averages[layer]['norm'], step=epoch, epoch=epoch, name=layer)
 
             if MASTER_PROCESS and epoch > -1 and checkpoint_freq > 0 and (epoch % checkpoint_freq == 0):
