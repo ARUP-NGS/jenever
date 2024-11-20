@@ -114,12 +114,14 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
 
         scaler.scale(loss).backward()
-        for name, layer in model.named_parameters():
-            norm = compute_gradient_norm(layer)
-            gradnorms[name].append(norm)
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        # Step with scaler
+        scaler.step(optimizer)
+        scaler.update()
 
         loss_sum += loss.item()
-        #torch.nn.utils.clip_grad_norm_(model.parameters(),  1.0)
         
         # May not play nice with AMP? Dont clip gradients if we're using AMP
         if not enable_amp:
@@ -477,8 +479,8 @@ def train_epochs(model,
                     "epochtime": elapsed.total_seconds(),
                 }, step=epoch)
 
-                for layer in gradlogger.keys():
-                    experiment.log_histogram_3d(gradlogger.moving_averages[layer], step=epoch, name=layer)
+                #for layer in gradlogger.keys():
+                #    experiment.log_histogram_3d(gradlogger.moving_averages[layer]['norm'], step=epoch, name=layer)
 
             if MASTER_PROCESS and epoch > -1 and checkpoint_freq > 0 and (epoch % checkpoint_freq == 0):
                 modelparts = str(model_dest).rsplit(".", maxsplit=1)
