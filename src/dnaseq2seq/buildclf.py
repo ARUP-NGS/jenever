@@ -608,14 +608,6 @@ if __name__ == "__main__":
                     datefmt='%m-%d %H:%M:%S',
                     level=logging.INFO)
 
-    # main()
+    main()
 
-    # aln = pysam.AlignmentFile("/Users/brendan/data/WGS/99702111878_NA12878_1ug.cram", reference_filename="/Users/brendan/data/ref_genome/human_g1k_v37_decoy_phiXAdaptr.fasta.gz")
-    vcf = pysam.VariantFile("test.vcf")
-    records = list(vcf)
-    model = load_model("/Users/brendan/data/jovian/g44e280_clf.model")
 
-    preds = predict_records(records, model, "/Users/brendan/data/WGS/99702111878_NA12878_1ug.cram", "/Users/brendan/data/ref_genome/human_g1k_v37_decoy_phiXAdaptr.fasta.gz")
-    print(preds)
-
-   # print(x)

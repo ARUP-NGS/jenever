@@ -103,17 +103,15 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
 
         scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-        loss_sum += loss.item()
-        #torch.nn.utils.clip_grad_norm_(model.parameters(),  1.0)
-        
-        # May not play nice with AMP? Dont clip gradients if we're using AMP
-        if not enable_amp:
-            torch.nn.utils.clip_grad_norm_(model.parameters(),  1.0)
-        
-        logger.debug("Stepping optimizer...")
+        # Step with scaler
         scaler.step(optimizer)
         scaler.update()
+
+        loss_sum += loss.item()
+        
         lr_schedule.add_iters(src.shape[0])
         samples_perf += src.shape[0]
         if batch % 10 == 0:
@@ -464,11 +462,6 @@ def train_epochs(model,
                     "epochtime": elapsed.total_seconds(),
                 }, step=epoch)
 
-                for layer in gradlogger.keys():
-                    logger.info(f"Logging histogram for {layer} step: {epoch}")
-                    if "fc1" in layer:
-                        logger.info(f"FC1 vals: {gradlogger.moving_averages[layer]['norm']}")
-                    experiment.log_histogram_3d(gradlogger.moving_averages[layer]['norm'], step=epoch, epoch=epoch, name=layer)
 
             if MASTER_PROCESS and epoch > -1 and checkpoint_freq > 0 and (epoch % checkpoint_freq == 0):
                 modelparts = str(model_dest).rsplit(".", maxsplit=1)
