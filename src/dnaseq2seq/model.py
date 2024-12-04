@@ -4,6 +4,7 @@ import logging
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import math
 
@@ -156,13 +157,16 @@ class VarTransformer(nn.Module):
         self.decode_output_converter1 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
 
         self.softmax = nn.LogSoftmax(dim=-1)
-        self.elu = torch.nn.ELU()
+        self.emb_layernorm = nn.LayerNorm(self.embed_dim)
+        self.emb_dropout = nn.Dropout(p_dropout)
+
 
     def encode(self, src):
-        src = self.elu(self.fc1(src))
+        src = F.gelu(self.fc1(src)) # Operates on each "feature" (10 feature encoded base)
         src = self.pos_encoder(src)  # For 2D encoding we have to do this before flattening, right?
         src = src.flatten(start_dim=2)
-        src = self.elu(self.fc2(src))
+        src = F.gelu(self.fc2(src)) # Operates on an entire alignment column
+        src = self.emb_dropout(self.emb_layernorm(src))
         mem = self.encoder(src)
         return mem
 
