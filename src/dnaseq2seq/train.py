@@ -547,6 +547,12 @@ def load_conf(conf_file, **kwargs):
     return conf
 
 
+def unwrap_model(module):
+    if isinstance(module, DDP):
+        return module.module
+    return module
+
+
 def train(output_model, **kwargs):
     """
     Conduct a training run and save the trained parameters (statedict) to output_model
@@ -599,8 +605,10 @@ def train(output_model, **kwargs):
         ckpt = None
     model = load_model(kwargs['model'], ckpt)
 
-    logger.info(f"Truncating max read depth to {model.read_depth}")
-    dataloader = loader.TruncateDepthLoader(dataloader, model.read_depth)
+    model_unwrapped = unwrap_model(model)
+
+    logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
+    dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
 
 
     if kwargs.get('model_encoder_fix'):
