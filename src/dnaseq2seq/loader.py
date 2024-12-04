@@ -313,3 +313,14 @@ class PregenLoader:
         for result in iterate_dir(self.device, self.pathpairs, batch_size, self.max_decomped, self.threads):
             yield result
 
+
+class TruncateReadDepthLoader(PregenLoader):
+
+    def __init__(self, max_read_depth, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_read_depth = max_read_depth
+        logger.info(f"Truncating read depth to {self.max_read_depth}")
+
+    def iter_once(self, batch_size):
+        for src, tgt, vaftgt, varsinfo in super().iter_once(batch_size):
+            yield src[:, :self.max_read_depth, :, :], tgt, vaftgt, varsinfo
