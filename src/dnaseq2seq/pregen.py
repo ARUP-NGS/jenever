@@ -344,5 +344,3 @@ def encode_chunks(bampath, refpath, bed, vcf, chunk_size, max_reads_per_aln, sam
         yield torch.stack(allsrc).char(), torch.stack(alltgt).long(), torch.tensor(allrowtn), varsinfo
 
     logger.info(f"Done loading {count} tensors from {bampath}")
-
-

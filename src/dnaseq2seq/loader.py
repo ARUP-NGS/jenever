@@ -313,3 +313,18 @@ class PregenLoader:
         for result in iterate_dir(self.device, self.pathpairs, batch_size, self.max_decomped, self.threads):
             yield result
 
+
+class TruncateDepthLoader:
+    """
+    A loader that truncates the read depth of the tensors to a fixed value
+    Remember that the tensors are (batch, sequence, read, features) so we are truncating dimension 2
+    """
+
+    def __init__(self, loader, max_read_depth):
+        self.loader = loader
+        self.max_read_depth = max_read_depth
+        logger.info(f"Truncating read depth to {self.max_read_depth}")
+
+    def iter_once(self, batch_size):
+        for src, tgt, *_ in self.loader.iter_once(batch_size):
+            yield src[:, :, 0:self.max_read_depth, :], tgt, *_

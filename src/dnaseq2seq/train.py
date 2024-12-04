@@ -104,13 +104,14 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
-        # Step with scaler
-        scaler.step(optimizer)
-        scaler.update()
 
         loss_sum += loss.item()
+
+        logger.debug("Stepping optimizer...")
+        scaler.step(optimizer)
+        scaler.update()
         
         lr_schedule.add_iters(src.shape[0])
         samples_perf += src.shape[0]
@@ -317,6 +318,7 @@ def load_model(modelconf, ckpt):
             logger.warning(f"Found model conf AND a checkpoint with model conf - using the model params from checkpoint")
             modelconf = ckpt['conf']
 
+
     logger.info(f"Model conf: {modelconf}")
     model = VarTransformer(read_depth=modelconf['max_read_depth'],
                            feature_count=modelconf['feats_per_read'],
@@ -399,8 +401,6 @@ def train_epochs(model,
         valpaths = dataloader.retain_val_samples(fraction=0.05)
         val_loader = loader.PregenLoader(device=DEVICE, datadir=None, pathpairs=valpaths, threads=4, tgt_prefix="tgkmers")
         logger.info(f"Pulled {len(valpaths)} samples to use for validation")
-
-    gradlogger = loggers.GradientMonitor(model, window_size=100)
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
@@ -598,6 +598,10 @@ def train(output_model, **kwargs):
     else:
         ckpt = None
     model = load_model(kwargs['model'], ckpt)
+
+    logger.info(f"Truncating max read depth to {model.read_depth}")
+    dataloader = loader.TruncateDepthLoader(dataloader, model.read_depth)
+
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
