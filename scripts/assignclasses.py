@@ -43,7 +43,7 @@ sys.stderr.write(f"Loading variants from {sys.argv[1]}\n")
 sys.stderr.flush()
 vcf = pysam.VariantFile(sys.argv[1])
 
-sys.stderr.write("Loading forest from " + sys.argv[2] + "\n")
+sys.stderr.write("Loading forast from " + sys.argv[2] + "\n")
 sys.stderr.flush()
 forest = buildforest(sys.argv[2])
 
