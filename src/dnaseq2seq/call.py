@@ -284,8 +284,7 @@ def call_vars_in_parallel(
 
     regions_queue = mp.Queue(maxsize=1024)  # Hold BED file regions, generated in main process and sent to 'generate_tensors' workers
     tensors_queue =  mp.Queue(maxsize=5000)  # Holds tensors generated in 'generate tensors' workers, consumed by accumulate_regions_and_call
-    region_keepalive_queue = mp.Queue()  # Signals to region_workers that they are permitted to die, since all tensors have been processed
-
+ 
     bed_chrom_order = util.unique_chroms(bed)
     priority_func = partial(region_priority, chrom_order=bed_chrom_order)
     progress_tracker = util.RegionProgressCounter(bed)
@@ -500,6 +499,18 @@ def call_multi_paths(datas, model, refpath, bampath, classifier_model, vcf_templ
     return var_records
 
 
+def init_vcf_output(vcf_out_path, vcf_header_extras):
+    """
+    Initialize the VCF output file and template
+    """
+    vcf_header = vcf.create_vcf_header(sample_name="sample", lowcov=20, cmdline=vcf_header_extras)
+    vcf_template = pysam.VariantFile("/dev/null", mode='w', header=vcf_header)
+    vcf_out = open(vcf_out_path, "w")
+    vcf_out.write(str(vcf_header))
+    vcf_out.flush()
+    return vcf_out, vcf_template
+
+
 def accumulate_regions_and_call(modelpath: str,
                                 inputq: mp.Queue,
                                 priority_func: Callable,
@@ -507,8 +518,8 @@ def accumulate_regions_and_call(modelpath: str,
                                 bampath: str,
                                 classifier_path,
                                 max_batch_size: int,
-                                vcf_out_path: str,
-                                header_extras: str,
+                                vcf_out: str,
+                                vcf_header_extras: str,
                                 n_region_workers: int,
                                 callstate: dict,
                                 progress_tracker: util.RegionProgressCounter,
@@ -527,15 +538,10 @@ def accumulate_regions_and_call(modelpath: str,
     else:
         classifier = None
 
-    vcf_header = vcf.create_vcf_header(sample_name="sample", lowcov=20, cmdline=header_extras)
-    vcf_template = pysam.VariantFile("/dev/null", mode='w', header=vcf_header)
-
-    vcf_out = open(vcf_out_path, "w")
-    vcf_out.write(str(vcf_header))
-    vcf_out.flush()
-
     datas = []
     bp_processed = 0
+
+    vcf_out_fh, vcf_template = init_vcf_output(vcf_out, vcf_header_extras)
 
     # Not sure what the optimum is here - we accumulate tensors until we have at least this many, then process them in batches
     # If this number is too large, we will wait for too long before submitting the next batch to the GPU
@@ -546,7 +552,8 @@ def accumulate_regions_and_call(modelpath: str,
     regions_found = 0
     regions_processed = 0
     tot_regions_submitted = 0
-    vbuff = util.VariantSortedBuffer(outputfh=vcf_out, buff_size=10000)
+    # vbuff = util.VariantSortedBuffer(outputfh=vcf_out, buff_size=10000)
+    vbuff = util.SortedVariantWriter(outputfh=vcf_out_fh)
     if show_progress:
         progbar = tqdm(total=100, position=1, desc="Variant calling")
     else:
@@ -639,7 +646,7 @@ def accumulate_regions_and_call(modelpath: str,
     logger.info(f"Calling queue spent {wait_time_total :.3f} seconds waiting for info and {process_time_total :.3f} seconds processing data")
     logger.info(f"Spent {TOTAL_TIME_CLF :.3f} seconds in classifier")
     vbuff.flush()
-    vcf_out.close()
+    vcf_out_fh.close()
 
     logger.debug("Calling worker is exiting")
 
