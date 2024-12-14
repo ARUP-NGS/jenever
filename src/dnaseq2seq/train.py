@@ -51,8 +51,6 @@ else:
     experiment = None
 
 
-
-
 def compute_twohap_loss(preds, tgt, criterion):
     """
     Iterate over every item in the batch, and compute the loss in both configurations (under torch.no_grad())
