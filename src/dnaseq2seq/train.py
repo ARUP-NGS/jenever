@@ -318,7 +318,7 @@ def load_model(modelconf, ckpt):
 
 
     logger.info(f"Model conf: {modelconf}")
-    model = VarTransformer(read_depth=modelconf['max_read_depth'],
+    model = VarTransformer(read_depth=modelconf.get('max_read_depth', 150),
                            feature_count=modelconf['feats_per_read'],
                            kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
                            n_encoder_layers=modelconf['encoder_layers'],
