@@ -74,7 +74,7 @@ def compute_twohap_loss(preds, tgt, criterion):
 
 
 
-def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
+def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False, tn_loss_weight=0.1):
     """
     Train until we've seen more than 'num_samples' from the loader, then return the loss
     """
@@ -84,10 +84,11 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     scaler = GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
+    tn_criterion = nn.BCEWithLogitsLoss()
     for batch, data in enumerate(loader_iter):
         src = data["src"]
         tgt_kmers = data["tgt"]
-        tgt_cls = data["tgt_cls"]
+        tgt_cls = data["tntgt"]
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -102,6 +103,10 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
 
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+
+            tnloss = tn_criterion(cls_pred.squeeze(1), tgt_cls)
+
+            loss = loss + tn_loss_weight * tnloss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -231,7 +236,7 @@ def calc_val_accuracy(loader, model, criterion):
         for data in loader.iter_once(64):
             src = data["src"]
             tgt_kmers = data["tgt"]
-            tgt_cls = data["tgt_cls"]
+            tgt_cls = data["tntgt"]
             total_batches += 1
             tot_samples += src.shape[0]
             seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length

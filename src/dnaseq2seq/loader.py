@@ -209,7 +209,7 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
             yield {
                 "src": src_t[start:end].to(device).float(),
                 "tgt": tgt_t[start:end].to(device).long(),
-                "tntgt": tgt_cls_t[start:end].to(device).long(),
+                "tntgt": tgt_cls_t[start:end].to(device).float(), # BCELoss expects float
                 "decomp_time": decomp_time,
             }
             decomp_time = 0.0
@@ -227,13 +227,13 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
         yield {     
             "src": torch.cat(src, dim=0).to(device).float(),
             "tgt": torch.cat(tgt, dim=0).to(device).long(),
-            "tntgt": torch.cat(tgt_cls, dim=0).to(device).long(),
+            "tntgt": torch.cat(tgt_cls, dim=0).to(device).float(),
             "decomp_time": 0.0,
         }
     logger.info(f"Done iterating data")
 
-def load_files(datadir, src_prefix="src", tgt_prefix=""):
-    pathpairs = util.find_files(datadir, src_prefix, tgt_prefix)
+def load_files(datadir, src_prefix="src", tgt_prefix="", tn_prefix="tntgt"):
+    pathpairs = util.find_files(datadir, src_prefix, tgt_prefix, tn_prefix)
     logger.info(f"Loaded {len(pathpairs)} from {datadir}")
     random.shuffle(pathpairs)
     return pathpairs
@@ -255,7 +255,7 @@ class CurriculumLoader:
 
 class PregenLoader:
 
-    def __init__(self, device, datadir, threads, max_decomped_batches=10, src_prefix="src", tgt_prefix="tgt", vaftgt_prefix="vaftgt", pathpairs=None):
+    def __init__(self, device, datadir, threads, max_decomped_batches=10, src_prefix="src", tgt_prefix="tgt", tn_prefix="tntgt", pathpairs=None):
         """
         Create a new loader that reads tensors from a 'pre-gen' directory
         :param device: torch.device
@@ -268,6 +268,7 @@ class PregenLoader:
         self.datadir = Path(datadir) if datadir else None
         self.src_prefix = src_prefix
         self.tgt_prefix = tgt_prefix
+        self.tn_prefix = tn_prefix
         if pathpairs and datadir:
             raise ValueError(f"Both datadir and pathpairs specified for PregenLoader - please choose just one")
         if pathpairs:
@@ -279,8 +280,6 @@ class PregenLoader:
         self.max_decomped = max_decomped_batches # Max number of decompressed items to store at once - increasing this uses more memory, but allows increased parallelization
         logger.info(f"Creating PreGen data loader with {self.threads} threads")
         logger.info(f"Found {len(self.pathpairs)} batches in {datadir}")
-        logger.info(f"Possible sharing strategies: {mp.get_all_sharing_strategies()}")
-        #mp.set_sharing_strategy("file_system")
         logger.info(f"Current sharing strategy: {mp.get_sharing_strategy()}")
         if not self.pathpairs:
             raise ValueError(f"Could not find any files in {datadir}")
@@ -309,7 +308,7 @@ class PregenLoader:
         sequentially
         :param batch_size: The number of samples in a minibatch.
         """
-        self.pathpairs = load_files(self.datadir, self.src_prefix, self.tgt_prefix) # Search for new data with every iteration ?
+        self.pathpairs = load_files(self.datadir, self.src_prefix, self.tgt_prefix, self.tn_prefix) # Search for new data with every iteration ?
         for result in iterate_dir(self.device, self.pathpairs, batch_size, self.max_decomped, self.threads):
             yield result
 

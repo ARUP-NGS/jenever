@@ -196,7 +196,7 @@ class VarTransformer(nn.Module):
         src = self.emb_dropout(self.emb_layernorm(src))
         mem = self.encoder(src)
 
-        cls_embed = mem[:, 0, :, :]
+        cls_embed = mem[:, 0, :]
         cls_pred = self.cls_classifier(cls_embed)
         return mem, cls_pred
 
