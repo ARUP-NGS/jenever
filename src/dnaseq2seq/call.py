@@ -198,6 +198,12 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
     if 'cuda' in str(DEVICE):
         for idev in range(torch.cuda.device_count()):
             logger.info(f"Using CUDA device {idev} {torch.cuda.get_device_name({idev})}")
+    else:
+        logger.warning("No CUDA device found, this will be slow")
+        try:
+            torch.cuda.current_device()
+        except Exception as ex:
+            logger.error(ex)
 
     logger.info(f"The model will be loaded from path {model_path}")
 
