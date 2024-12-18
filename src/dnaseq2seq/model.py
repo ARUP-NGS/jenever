@@ -11,6 +11,7 @@ import math
 
 logger = logging.getLogger(__name__)
 
+
 class PositionalEncoding2D(nn.Module):
 
     def __init__(self, channels, device):
@@ -102,6 +103,24 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class CLSClassifier(nn.Module):
+    """
+    A simple classifier for the CLS token.
+    """
+    def __init__(self, embed_dim, cls_output_classes):
+        super().__init__()
+        self.cls_predictor = nn.Sequential(
+            nn.Linear(embed_dim, 128),
+            nn.GELU(),
+            nn.Linear(128, 64),
+            nn.GELU(),
+            nn.Linear(64, cls_output_classes)
+        )
+
+    def forward(self, x):
+        return self.cls_predictor(x)
+
+
 class VarTransformer(nn.Module):
 
     def __init__(self,
@@ -116,15 +135,19 @@ class VarTransformer(nn.Module):
                  n_decoder_layers,
                  decoder_embed_dim,
                  p_dropout=0.1,
+                 cls_output_classes=1,
                  device='cpu'):
         super().__init__()
 
         self.device = device
+        self.cls_token = torch.zeros((1,feature_count))
+        self.cls_token[:, 0:4] = 1
         self.read_depth = read_depth
         self.kmer_dim = kmer_dim
         self.decoder_embed_dim = decoder_embed_dim
         self.embed_dim = encoder_attention_heads * embed_dim_factor
         self.fc1_hidden = 12
+        self.cls_classifier = CLSClassifier(self.embed_dim, cls_output_classes)
 
         self.fc1 = nn.Linear(feature_count, self.fc1_hidden)
         self.fc2 = nn.Linear(self.read_depth * self.fc1_hidden, self.embed_dim)
@@ -162,15 +185,23 @@ class VarTransformer(nn.Module):
 
 
     def encode(self, src):
+
+        # Add CLS token to the beginning of the sequence, the dimensions of src are (batch_size, seq_len, read_depth, feature_count)
+        src = torch.cat((self.cls_token.unsqueeze(0).repeat(src.shape[0], 1, src.shape[2], 1), src), dim=1)
+
         src = F.gelu(self.fc1(src)) # Operates on each "feature" (10 feature encoded base)
         src = self.pos_encoder(src)  # For 2D encoding we have to do this before flattening, right?
         src = src.flatten(start_dim=2)
         src = F.gelu(self.fc2(src)) # Operates on an entire alignment column
         src = self.emb_dropout(self.emb_layernorm(src))
         mem = self.encoder(src)
-        return mem
+
+        cls_embed = mem[:, 0, :, :]
+        cls_pred = self.cls_classifier(cls_embed)
+        return mem, cls_pred
 
     def decode(self, mem, tgt, tgt_mask, tgt_key_padding_mask=None):
+        
         mem_proj = self.converter(mem)
 
         tgt0 = self.tgt_pos_encoder(tgt[:, 0, :, :])
@@ -196,7 +227,8 @@ class VarTransformer(nn.Module):
         return torch.stack((h0, h1), dim=1)
 
     def forward(self, src, tgt, tgt_mask, tgt_key_padding_mask=None):
-        mem = self.encode(src)
+        mem, cls_pred = self.encode(src)
         result = self.decode(mem, tgt.float(), tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
-        return result
+        return result, cls_pred
+
 

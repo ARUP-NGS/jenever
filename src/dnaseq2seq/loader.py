@@ -176,7 +176,7 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
     of the data in parallel using 'threads' threads. Yield (src, tgt, None, None, None) values (the Nones are used
     for additional labels or debugging)
     """
-    src, tgt = [], []
+    src, tgt, tgt_cls = [], [], []
     for i in range(0, len(pathpairs), max_decomped):
         logger.info(f"Decompressing {i}-{i + max_decomped} files of {len(pathpairs)}")
         decomp_start = datetime.now()
@@ -185,10 +185,10 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
         decomp_end = datetime.now()
         decomp_time = (decomp_end - decomp_start).total_seconds()
 
-        for j in range(0, len(decomped), 2):
+        for j in range(0, len(decomped), 3):
             src.append(decomped[j])
             tgt.append(decomped[j + 1])
-
+            tgt_cls.append(decomped[j + 2])
         total_size = sum([s.shape[0] for s in src])
         if total_size < batch_size:
             # We need to decompress more data to make a batch
@@ -197,6 +197,7 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
         # Make a big tensor.
         src_t = torch.cat(src, dim=0)
         tgt_t = torch.cat(tgt, dim=0)
+        tgt_cls_t = torch.cat(tgt_cls, dim=0)
 
         nbatch = total_size // batch_size
         remain = total_size % batch_size
@@ -205,31 +206,30 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
         for n in range(0, nbatch):
             start = n * batch_size
             end = (n + 1) * batch_size
-            yield (
-                src_t[start:end].to(device).float(),
-                tgt_t[start:end].to(device).long(),
-                None,  # vaftgt_t[start:end].to(self.device),
-                None,
-                {"decomp_time": decomp_time},
-            )
+            yield {
+                "src": src_t[start:end].to(device).float(),
+                "tgt": tgt_t[start:end].to(device).long(),
+                "tntgt": tgt_cls_t[start:end].to(device).long(),
+                "decomp_time": decomp_time,
+            }
             decomp_time = 0.0
 
         if remain:
             # The remaining data points will be in next batch.
             src = [src_t[nbatch * batch_size:]]
             tgt = [tgt_t[nbatch * batch_size:]]
+            tgt_cls = [tgt_cls_t[nbatch * batch_size:]]
         else:
-            src, tgt = [], []
+            src, tgt, tgt_cls = [], [], []
 
     if len(src) > 0:
         # We need to yield the last batch.
-        yield (
-            torch.cat(src, dim=0).to(device).float(),
-            torch.cat(tgt, dim=0).to(device).long(),
-            None,
-            None,
-            {"decomp_time": 0.0},
-        )
+        yield {     
+            "src": torch.cat(src, dim=0).to(device).float(),
+            "tgt": torch.cat(tgt, dim=0).to(device).long(),
+            "tntgt": torch.cat(tgt_cls, dim=0).to(device).long(),
+            "decomp_time": 0.0,
+        }
     logger.info(f"Done iterating data")
 
 def load_files(datadir, src_prefix="src", tgt_prefix=""):
@@ -326,5 +326,6 @@ class TruncateDepthLoader:
         logger.info(f"Truncating read depth to {self.max_read_depth}")
 
     def iter_once(self, batch_size):
-        for src, tgt, *_ in self.loader.iter_once(batch_size):
-            yield src[:, :, 0:self.max_read_depth, :], tgt, *_
+        for data in self.loader.iter_once(batch_size):
+            data["src"] = data["src"][:, :, 0:self.max_read_depth, :]
+            yield data

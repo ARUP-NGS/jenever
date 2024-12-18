@@ -54,7 +54,7 @@ def format_bp(bp):
     try:
         bp = int(bp)
         if bp < 10000:
-            return f"{bp:,}"
+            return f"{bp:,} bp"
         elif bp < 1000000:
             return f"{round(bp/1000, 2):,} Kb"
         elif bp < 1e9:
@@ -416,7 +416,7 @@ def predict_sequence(src, model, n_output_toks, device):
     start = time.perf_counter()
     predictions = torch.stack((START_TOKEN, START_TOKEN), dim=0).expand(src.shape[0], -1, -1, -1).float().to(device)
     probs = torch.zeros(src.shape[0], 2, 1).float().to(device)
-    mem = model.encode(src)
+    mem, cls_pred = model.encode(src)
     encode = time.perf_counter()
     encode_elapsed = encode - start
     step_time = time.perf_counter()
@@ -431,7 +431,7 @@ def predict_sequence(src, model, n_output_toks, device):
         step_time = time.perf_counter()
     decode_elapsed = time.perf_counter() - encode
     logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
-    return predictions[:, :, 1:, :], probs[:, :, 1:]
+    return predictions[:, :, 1:, :], probs[:, :, 1:], cls_pred
 
 def default_chrom_sort_key(c):
     c = c.replace("chr", "")

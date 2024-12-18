@@ -84,7 +84,10 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     scaler = GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
-    for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
+    for batch, data in enumerate(loader_iter):
+        src = data["src"]
+        tgt_kmers = data["tgt"]
+        tgt_cls = data["tgt_cls"]
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -95,7 +98,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         logger.debug("Forward pass...")
 
         with amp.autocast(enabled=enable_amp): # dtype is bfloat16 by default
-            seq_preds = model(src, tgt_kmers_input, tgt_mask)
+            seq_preds, cls_pred = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
@@ -225,7 +228,10 @@ def calc_val_accuracy(loader, model, criterion):
         loss_tot = 0
 
         swap_tot = 0
-        for src, tgt_kmers, vaf, *_ in loader.iter_once(64):
+        for data in loader.iter_once(64):
+            src = data["src"]
+            tgt_kmers = data["tgt"]
+            tgt_cls = data["tgt_cls"]
             total_batches += 1
             tot_samples += src.shape[0]
             seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
@@ -348,8 +354,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    #logger.info("Compiling model...")
+    #model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
