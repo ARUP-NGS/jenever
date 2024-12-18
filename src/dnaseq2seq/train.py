@@ -8,6 +8,7 @@ import yaml
 from datetime import datetime
 import os
 from pygit2 import Repository
+import sklearn.metrics as metrics
 
 import torch
 from torch import nn
@@ -102,11 +103,11 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             seq_preds, cls_pred = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
-            haploss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+            loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
 
             tnloss = tn_criterion(cls_pred.squeeze(1), tgt_cls)
 
-            loss = haploss + tn_loss_weight * tnloss
+            loss = loss + tn_loss_weight * tnloss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -124,7 +125,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         if batch % 10 == 0:
             elapsed = time.perf_counter() - start
             samples_per_sec = samples_perf / elapsed
-            logger.info(f"Batch {batch}  samples: {samples_seen}   haploss: {haploss.item():.3f} tnloss: {tnloss.item() :.3f}  swaps: {swaps}   samples/sec: {samples_per_sec :.2f}")
+            logger.info(f"Batch {batch}  samples: {samples_seen}   loss: {loss.item():.3f}   swaps: {swaps}   samples/sec: {samples_per_sec :.2f}")
             start = time.perf_counter()
             samples_perf = 0
 
@@ -231,15 +232,18 @@ def calc_val_accuracy(loader, model, criterion):
         tot_samples = 0
         total_batches = 0
         loss_tot = 0
+        tot_precision = 0
+        tot_recall = 0
+        tot_f1 = 0
 
         swap_tot = 0
-        for data in loader.iter_once(64):
+        for i, data in enumerate(loader.iter_once(64)):
             src = data["src"]
             tgt_kmers = data["tgt"]
             tgt_cls = data["tntgt"]
             total_batches += 1
             tot_samples += src.shape[0]
-            seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
+            seq_preds, probs, tn_logits = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
 
             #tgt_kmers = util.tgt_to_kmers(tgt[:, :, 0:truncate_seq_len]).float().to(DEVICE)
             tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)[:, :, 1:]
@@ -249,6 +253,13 @@ def calc_val_accuracy(loader, model, criterion):
             loss, swaps = compute_twohap_loss(seq_preds, tgt_kmer_idx, criterion)
             loss_tot += loss
             swap_tot += swaps
+
+            # Compute binary classification accuracy metrics
+            tnpreds = torch.sigmoid(tn_logits) 
+            prec, recall, f1, _ = metrics.precision_recall_fscore_support(tgt_cls.cpu().numpy(), tnpreds.cpu().numpy(), average='binary')
+            tot_precision += prec
+            tot_recall += recall
+            tot_f1 += f1
 
             midmatch0, varcount0, results_totals0 = _calc_hap_accuracy(src, seq_preds[:, 0, :, :], tgt_kmer_idx[:, 0, :], result_totals0)
             midmatch1, varcount1, results_totals1 = _calc_hap_accuracy(src, seq_preds[:, 1, :, :], tgt_kmer_idx[:, 1, :], result_totals1)
@@ -264,7 +275,10 @@ def calc_val_accuracy(loader, model, criterion):
             var_counts_sum1 / tot_samples,
             result_totals0, result_totals1,
             loss_tot,
-            swap_tot)
+            swap_tot,
+            tot_precision / total_batches,
+            tot_recall / total_batches,
+            tot_f1 / total_batches)
 
 
 def safe_compute_ppav(results0, results1, key):
@@ -401,7 +415,6 @@ def train_epochs(model,
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
     ])
 
-
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
         for epoch in range(epochs):
@@ -420,7 +433,7 @@ def train_epochs(model,
             dist.barrier()
 
             # This runs on every process, to avoid communication timeouts when there are lots of validation samples
-            acc0, acc1, var_count0, var_count1, results0, results1, val_loss, swaps = calc_val_accuracy(val_loader, model, criterion)
+            acc0, acc1, var_count0, var_count1, results0, results1, val_loss, swaps, tn_prec, tn_recall, tn_f1 = calc_val_accuracy(val_loader, model, criterion)
 
             ppa_dels, ppv_dels = safe_compute_ppav(results0, results1, 'del')
             ppa_ins, ppv_ins = safe_compute_ppav(results0, results1, 'ins')
@@ -460,6 +473,9 @@ def train_epochs(model,
                     "learning_rate": scheduler.get_last_lr(),
                     "hap_swaps": swaps,
                     "epochtime": elapsed.total_seconds(),
+                    "tn_stats/tn_precision": tn_prec,
+                    "tn_stats/tn_recall": tn_recall,
+                    "tn_stats/tn_f1": tn_f1,
                 }, step=epoch)
 
 
@@ -609,13 +625,11 @@ def train(output_model, **kwargs):
 
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
-
-    val_dir = kwargs.get("val_dir")
+    val_dir = kwargs.get('val_dir')
     val_loader = loader.TruncateDepthLoader(
             loader.PregenLoader(device=DEVICE, datadir=val_dir, max_decomped_batches=4, threads=8, tgt_prefix="tgkmers"),
             model_unwrapped.read_depth,
-            )
-    logger.info(f"Found {len(val_loader)} items in validation loader dir {val_dir}")
+        )
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
