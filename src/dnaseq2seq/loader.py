@@ -300,6 +300,9 @@ class PregenLoader:
         logger.info(f"Number of batches left for training: {len(self.pathpairs)}")
         return val_samples
 
+    def __len__(self):
+        return len(self.pathpairs)
+
     def iter_once(self, batch_size):
         """
         Make one pass over the training data, in this case all of the files in the 'data dir'
@@ -328,3 +331,7 @@ class TruncateDepthLoader:
         for data in self.loader.iter_once(batch_size):
             data["src"] = data["src"][:, :, 0:self.max_read_depth, :]
             yield data
+
+    def __len__(self):
+        return len(self.loader.pathpairs)
+

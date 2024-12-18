@@ -102,11 +102,11 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             seq_preds, cls_pred = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
-            loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+            haploss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
 
             tnloss = tn_criterion(cls_pred.squeeze(1), tgt_cls)
 
-            loss = loss + tn_loss_weight * tnloss
+            loss = haploss + tn_loss_weight * tnloss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -124,7 +124,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         if batch % 10 == 0:
             elapsed = time.perf_counter() - start
             samples_per_sec = samples_perf / elapsed
-            logger.info(f"Batch {batch}  samples: {samples_seen}   loss: {loss.item():.3f}   swaps: {swaps}   samples/sec: {samples_per_sec :.2f}")
+            logger.info(f"Batch {batch}  samples: {samples_seen}   haploss: {haploss.item():.3f} tnloss: {tnloss.item() :.3f}  swaps: {swaps}   samples/sec: {samples_per_sec :.2f}")
             start = time.perf_counter()
             samples_perf = 0
 
@@ -379,10 +379,10 @@ def train_epochs(model,
                  optimizer,
                  epochs,
                  dataloader,
+                 val_loader,
                  scheduler,
                  checkpoint_freq=0,
                  model_dest=None,
-                 val_dir=None,
                  batch_size=64,
                  xtra_checkpoint_items={},
                  samples_per_epoch=10000,
@@ -401,15 +401,6 @@ def train_epochs(model,
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
     ])
 
-
-    if val_dir:
-        logger.info(f"Using validation data in {val_dir}")
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=val_dir, max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
-    else:
-        logger.info(f"No val. dir. provided retaining a few training samples for validation")
-        valpaths = dataloader.retain_val_samples(fraction=0.05)
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=None, pathpairs=valpaths, threads=4, tgt_prefix="tgkmers")
-        logger.info(f"Pulled {len(valpaths)} samples to use for validation")
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
@@ -619,6 +610,12 @@ def train(output_model, **kwargs):
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
 
+    val_dir = kwargs.get("val_dir")
+    val_loader = loader.TruncateDepthLoader(
+            loader.PregenLoader(device=DEVICE, datadir=val_dir, max_decomped_batches=4, threads=8, tgt_prefix="tgkmers"),
+            model_unwrapped.read_depth,
+            )
+    logger.info(f"Found {len(val_loader)} items in validation loader dir {val_dir}")
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
@@ -655,10 +652,10 @@ def train(output_model, **kwargs):
                  optimizer,
                  kwargs.get('epochs'),
                  dataloader,
+                 val_loader,
                  scheduler=scheduler,
                  model_dest=output_model,
                  checkpoint_freq=kwargs.get('checkpoint_freq', 10),
-                 val_dir=kwargs.get('val_dir'),
                  batch_size=kwargs.get("batch_size"),
                  samples_per_epoch=kwargs.get('samples_per_epoch'),
                  xtra_checkpoint_items=kwargs['model'],

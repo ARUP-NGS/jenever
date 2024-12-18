@@ -140,7 +140,7 @@ class VarTransformer(nn.Module):
         super().__init__()
 
         self.device = device
-        self.cls_token = torch.zeros((1,feature_count))
+        self.cls_token = torch.zeros((1,feature_count)).to(device)
         self.cls_token[:, 0:4] = 1
         self.read_depth = read_depth
         self.kmer_dim = kmer_dim
