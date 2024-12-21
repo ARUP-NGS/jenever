@@ -7,8 +7,8 @@ import time
 import yaml
 from datetime import datetime
 import os
+from pathlib import Path
 from pygit2 import Repository
-import sklearn.metrics as metrics
 
 import torch
 from torch import nn
@@ -16,6 +16,7 @@ import torch.distributed as dist
 from torch.cuda.amp import GradScaler
 import torch.cuda.amp as amp
 from torch.nn.parallel import DistributedDataParallel as DDP
+from sklearn import metrics
 
 
 from dnaseq2seq import vcf
@@ -23,6 +24,7 @@ from dnaseq2seq import loader
 from dnaseq2seq import util
 from dnaseq2seq.model import VarTransformer
 from dnaseq2seq import loggers
+from dnaseq2seq.checkpointer import Checkpointer
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
 formatter = logging.Formatter(LOG_FORMAT)
@@ -75,7 +77,7 @@ def compute_twohap_loss(preds, tgt, criterion):
 
 
 
-def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False, tn_loss_weight=0.1):
+def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
     """
     Train until we've seen more than 'num_samples' from the loader, then return the loss
     """
@@ -85,11 +87,10 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     scaler = GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
-    tn_criterion = nn.BCEWithLogitsLoss()
     for batch, data in enumerate(loader_iter):
         src = data["src"]
         tgt_kmers = data["tgt"]
-        tgt_cls = data["tntgt"]
+        tgt_cls = data["tgt_cls"]
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -104,10 +105,6 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
 
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
-
-            tnloss = tn_criterion(cls_pred.squeeze(1), tgt_cls)
-
-            loss = loss + tn_loss_weight * tnloss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -209,8 +206,6 @@ def eval_prediction(refseqstr, altseq, predictions, counts):
 
     return counts
 
-
-
 def calc_val_accuracy(loader, model, criterion):
     """
     Compute accuracy (fraction of predicted bases that match actual bases),
@@ -279,6 +274,7 @@ def calc_val_accuracy(loader, model, criterion):
             tot_precision / total_batches,
             tot_recall / total_batches,
             tot_f1 / total_batches)
+
 
 
 def safe_compute_ppav(results0, results1, key):
@@ -415,6 +411,10 @@ def train_epochs(model,
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
     ])
 
+    model_save_dir = Path(model_dest).parent
+    model_save_prefix = Path(model_dest).stem
+    checkpointer = Checkpointer(model=unwrap_model(model), save_prefix=model_save_prefix, save_dir=model_save_dir, minimize=True)
+
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
         for epoch in range(epochs):
@@ -479,26 +479,14 @@ def train_epochs(model,
                 }, step=epoch)
 
 
-            if MASTER_PROCESS and epoch > -1 and checkpoint_freq > 0 and (epoch % checkpoint_freq == 0):
-                modelparts = str(model_dest).rsplit(".", maxsplit=1)
-                checkpoint_name = modelparts[0] + f"_epoch{epoch}." + modelparts[1]
-                logger.info(f"Saving model state dict to {checkpoint_name}")
-                m = model.module if (isinstance(model, nn.DataParallel) or isinstance(model, DDP)) else model
-                ckpt_data = {
-                    'model': m.state_dict(),
-                    'conf': xtra_checkpoint_items,
-                    'opt': optimizer.state_dict(),
-                }
-                torch.save(ckpt_data, checkpoint_name)
+            if MASTER_PROCESS and epoch > -1:
+                checkpointer.step(value=val_loss, step=epoch, conf=xtra_checkpoint_items, opt=optimizer.state_dict())
+                
             dist.barrier()
         logger.info(f"Training completed after {epoch} epochs")
     except KeyboardInterrupt:
-        pass
+        checkpointer.step(value=val_loss, step=epoch, conf=xtra_checkpoint_items, opt=optimizer.state_dict())
 
-    if model_dest is not None:
-        logger.info(f"Saving model state dict to {model_dest}")
-        m = model.module if isinstance(model, nn.DataParallel) else model
-        torch.save(m.to('cpu').state_dict(), model_dest)
 
 
 def load_train_conf(confyaml):
@@ -615,6 +603,12 @@ def train(output_model, **kwargs):
                                      max_decomped_batches=kwargs.get('max_decomp_batches'),
                                      tgt_prefix="tgkmers")
 
+    val_loader = loader.PregenLoader(DEVICE,
+                                     kwargs.get("val_dir"),
+                                     threads=kwargs.get('threads'),
+                                     max_decomped_batches=kwargs.get('max_decomp_batches'),
+                                     tgt_prefix="tgkmers")
+
     if kwargs.get('input_model'):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
     else:
@@ -625,11 +619,7 @@ def train(output_model, **kwargs):
 
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
-    val_dir = kwargs.get('val_dir')
-    val_loader = loader.TruncateDepthLoader(
-            loader.PregenLoader(device=DEVICE, datadir=val_dir, max_decomped_batches=4, threads=8, tgt_prefix="tgkmers"),
-            model_unwrapped.read_depth,
-        )
+    val_loader = loader.TruncateDepthLoader(val_loader, model_unwrapped.read_depth)
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
