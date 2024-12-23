@@ -27,9 +27,22 @@ from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
 
+LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
+
+class CustomFormatter(logging.Formatter):
+    def format(self, record):
+        if record.levelno == logging.ERROR:
+            self._style._fmt = '[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s (line: %(lineno)d)'
+        else:
+            self._style._fmt = LOG_FORMAT
+        return super().format(record)
+    
+handler = logging.StreamHandler()
+handler.setFormatter(CustomFormatter(LOG_FORMAT))
 
 logger = logging.getLogger(__name__)
-
+logger.addHandler(handler)
+logger.setLevel(getattr(logging, os.environ.get('JV_LOGLEVEL', 'INFO').upper(), logging.INFO))
 
 DEVICE = torch.device("cuda") if hasattr(torch, 'cuda') and torch.cuda.is_available() else torch.device("cpu")
 
