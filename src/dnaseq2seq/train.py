@@ -26,11 +26,12 @@ from dnaseq2seq.model import VarTransformer
 from dnaseq2seq import loggers
 from dnaseq2seq.modelcheckpointer import Checkpointer
 
-LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
+LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s'
 formatter = logging.Formatter(LOG_FORMAT)
 handler = logging.FileHandler("jovian_train.log")
 handler.setLevel(logging.INFO)
 handler.setFormatter(formatter)
+
 
 logger = logging.getLogger(__name__)
 logger.addHandler(handler)
