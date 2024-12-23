@@ -347,7 +347,7 @@ def load_model(modelconf, ckpt):
                            embed_dim_factor=modelconf['embed_dim_factor'],
                            encoder_attention_heads=modelconf['encoder_attention_heads'],
                            decoder_attention_heads=modelconf['decoder_attention_heads'],
-                            decoder_embed_dim=modelconf['decoder_embed_dim'],
+                           decoder_embed_dim=modelconf['decoder_embed_dim'],
                            d_ff=modelconf['dim_feedforward'],
                            device=DEVICE)
 
