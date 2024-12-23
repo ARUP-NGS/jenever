@@ -433,7 +433,21 @@ def predict_sequence(src, model, n_output_toks, device):
     logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
     return predictions[:, :, 1:, :], probs[:, :, 1:]
 
-
+def default_chrom_sort_key(c):
+    c = c.replace("chr", "")
+    try:
+        return int(c)
+    except:
+        if c == 'X':
+            return 500
+        elif c == 'Y':
+            return 600
+        elif c == 'M' or c == 'MT':
+            return 700
+        else:
+            return 1000 + sum(ord(x) * (256 ** i) for i, x in enumerate(c))
+        
+            
 class VariantSortedBuffer:
     """ Holds a list of variants in a buffer and sorts them before writing to an output stream """
     
@@ -444,21 +458,10 @@ class VariantSortedBuffer:
         self.capacity_factor = capacity_factor
         self.lastchrom = None
         self.lastpos = -1
-
-    def _chromval(self, c):
-        c = c.replace("chr", "")
-        try:
-            return int(c)
-        except:
-            if c == 'X':
-                return 50
-            elif c == 'Y':
-                return 60
-            else:
-                return 100 + ord(c[0])
+ 
 
     def _sortkey(self, v):
-        return int(self._chromval(v.chrom) * 1e9) + v.pos
+        return int(default_chrom_sort_key(v.chrom) * 1e9) + v.pos
 
     def _sort(self):
         self.buffer = sorted(self.buffer, key=self._sortkey)
@@ -501,6 +504,36 @@ class VariantSortedBuffer:
             self.put(v)
 
 
+class SortedVariantWriter:
+    """ Stores all variants in memory, then writes variants to a file in sorted order """
+
+    def __init__(self, outputfh, chrom_order=None):
+        """
+        chrom_order determines the ordering of the output chroms
+        """
+        self.outputfh = outputfh
+        self.chrom_order = chrom_order
+        self.buffer = collections.defaultdict(list) 
+
+    def put(self, v):
+        if self.chrom_order is not None and v.chrom not in self.chrom_order:
+            raise ValueError(f"Unknown chromosome: {v.chrom}")
+        self.buffer[v.chrom].append(v)
+
+    def put_all(self, items):
+        for v in items:
+            self.put(v)
+    
+    def flush(self):
+        if self.chrom_order is None:
+            self.chrom_order = sorted(self.buffer.keys(), key=default_chrom_sort_key)
+        logger.info(f"Writing variants from {len(self.buffer)} chroms")
+        for chrom in self.chrom_order:
+            logger.info(f"Writing variants from {chrom}")
+            for v in sorted(self.buffer[chrom], key=lambda x: x.pos):
+                self.outputfh.write(str(v))
+            self.buffer[chrom] = []
+            self.outputfh.flush()
 
 
 class WarmupCosineLRScheduler:
