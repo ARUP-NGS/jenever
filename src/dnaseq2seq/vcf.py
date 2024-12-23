@@ -27,7 +27,7 @@ class Variant:
     var_index: int = None
     var_count: int = None
     aln_score: int = None
-    clspred: float = None
+    tnpred: float = None
 
     def __eq__(self, other):
         return self.chrom == other.chrom and self.ref == other.ref and self.alt == other.alt and self.pos == other.pos
@@ -80,7 +80,7 @@ class VcfVar:
     het: bool
     duplicate: bool
     alts: list
-    clspred: float
+    tnpred: List[float]
 
     @property
     def alt(self):
@@ -341,7 +341,7 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             duplicate=False,  # initialize but check later
             window_offset=[call.window_offset for call in vars_hap0[var]],
             var_index=[call.var_index for call in vars_hap0[var]],
-            clspred=[call.clspred for call in vars_hap0[var]],
+            tnpred=[call.tnpred for call in vars_hap0[var]],
         )
 
     vcfvars_hap1 = {}
@@ -371,7 +371,7 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             duplicate=False,  # initialize but check later
             window_offset=[call.window_offset for call in vars_hap1[var]],
             var_index=[call.var_index for call in vars_hap1[var]],
-            clspred=[call.clspred for call in vars_hap1[var]],
+            tnpred=[call.tnpred for call in vars_hap1[var]],
         )
 
     # check for homozygous vars
@@ -386,7 +386,7 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
         vcfvars_hap0[var].genotype = (1, 1)
         vcfvars_hap0[var].het = False
         vcfvars_hap0[var].window_offset = sorted(set(vcfvars_hap0[var].window_offset + vcfvars_hap1[var].window_offset))
-        vcfvars_hap0[var].tnpred = (vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred) / 2
+        vcfvars_hap0[var].tnpred = np.mean(c.tnpred for c in vcfvars_hap0[var] + vcfvars_hap1[var])
         # then remove from hap1 vars
         vcfvars_hap1.pop(var)
 
@@ -497,6 +497,8 @@ def create_vcf_header(sample_name="sample", lowcov=30, cmdline=None):
                                  ('Description', 'Order of call in window')])
     vcfh.add_meta('INFO', items=[('ID', "RAW_QUAL"), ('Number', 1), ('Type', 'Float'),
                                  ('Description', 'Original quality if classifier used to update QUAL field')])
+    vcfh.add_meta('INFO', items=[('ID', "TNPRED"), ('Number', "."), ('Type', 'Float'),
+                                 ('Description', 'Predicted probability of being a true negative')])
     # write to new vcf file object
     return vcfh
 
@@ -542,6 +544,7 @@ def create_vcf_rec(var, vcf_file):
     r.info['STEP_COUNT'] = var.step_count
     r.info['WIN_OFFSETS'] = [int(x) for x in var.window_offset]
     r.info['VAR_INDEX'] = [int(x) for x in var.var_index]
+    r.info['TNPRED'] = [float(f"{x :.4f}") for x in var.tnpred]
     if var.duplicate:
         r.info['DUPLICATE'] = ()
     return r

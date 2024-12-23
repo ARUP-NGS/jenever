@@ -935,13 +935,13 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
         hap1 = util.kmer_preds_to_seq(hap1_t, util.i2s)
         probs0 = np.exp(util.expand_to_bases(probs[b, 0, :]))
         probs1 = np.exp(util.expand_to_bases(probs[b, 1, :]))
-        clspred = clspred[b, 0, :]
+        tnpred = clspred[b].item() # This will need to change if clspred returns more than one value per region
 
         refseq = reference.fetch(chrom, offset, offset + len(hap0))
         vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, hap0, chrom, offset, probs=probs0) if start <= v.pos <= end)
         vars_hap1 = list(v for v in vcf.aln_to_vars(refseq, hap1, chrom, offset, probs=probs1) if start <= v.pos <= end)
         for v in vars_hap0 + vars_hap1:
-            v.clspred = clspred[v.pos - offset]
+            v.tnpred = tnpred
         #print(f"Offset: {offset}\twindow {start}-{end} frame: {start % 4} hap0: {vars_hap0}\n       hap1: {vars_hap1}")
         #calledvars.append((vars_hap0, vars_hap1))
         calledvars.append((vars_hap0[0:5], vars_hap1[0:5]))
