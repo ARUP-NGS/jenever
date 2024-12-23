@@ -24,7 +24,7 @@ from dnaseq2seq import loader
 from dnaseq2seq import util
 from dnaseq2seq.model import VarTransformer
 from dnaseq2seq import loggers
-from dnaseq2seq.checkpointer import Checkpointer
+from dnaseq2seq.modelcheckpointer import Checkpointer
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
 formatter = logging.Formatter(LOG_FORMAT)
@@ -413,7 +413,11 @@ def train_epochs(model,
 
     model_save_dir = Path(model_dest).parent
     model_save_prefix = Path(model_dest).stem
-    checkpointer = Checkpointer(model=unwrap_model(model), save_prefix=model_save_prefix, save_dir=model_save_dir, minimize=True)
+    checkpointer = Checkpointer(model=unwrap_model(model),
+                                save_prefix=model_save_prefix,
+                                save_dir=model_save_dir,
+                                minimize=True,
+                                max_checkpoints=5)
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)

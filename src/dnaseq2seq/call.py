@@ -892,7 +892,7 @@ def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, enable_amp=T
         end = min(encoded_reads.shape[0]+1, start + max_batch_size)
         logger.debug(f"Calling batch of size {end - start}")
         with torch.amp.autocast(device_type='cuda', enabled=enable_amp):
-            preds, prbs = util.predict_sequence(encoded_reads[start:end, :, :, :].to(DEVICE).float(), model,
+            preds, prbs, clspred = util.predict_sequence(encoded_reads[start:end, :, :, :].to(DEVICE).float(), model,
                                             n_output_toks=n_output_toks, device=DEVICE)
         if seq_preds is None:
             seq_preds = preds
@@ -903,7 +903,7 @@ def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, enable_amp=T
         else:
             probs = np.concatenate((probs, prbs.detach().cpu().numpy()), axis=0)
         start += max_batch_size
-    return seq_preds, probs
+    return seq_preds, probs, clspred.cpu().numpy()
 
 
 def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks, max_batch_size):
@@ -916,7 +916,10 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
     assert encoded_reads.shape[0] == len(regions), f"Expected the same number of reads as regions, but got {encoded_reads.shape[0]} reads and {len(regions)}"
     assert len(offsets) == len(regions), f"Should be as many offsets as regions, but found {len(offsets)} and {len(regions)}"
 
-    seq_preds, probs = _call_safe(encoded_reads, model, n_output_toks, max_batch_size)
+    seq_preds, probs, clspred = _call_safe(encoded_reads, model, n_output_toks, max_batch_size)
+
+    # convert clspred logits to probabilities
+    clspred = np.exp(clspred)
 
     calledvars = []
     for offset, (chrom, start, end), b in zip(offsets, regions, range(len(seq_preds))):
@@ -925,10 +928,13 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
         hap1 = util.kmer_preds_to_seq(hap1_t, util.i2s)
         probs0 = np.exp(util.expand_to_bases(probs[b, 0, :]))
         probs1 = np.exp(util.expand_to_bases(probs[b, 1, :]))
+        clspred = clspred[b, 0, :]
 
         refseq = reference.fetch(chrom, offset, offset + len(hap0))
         vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, hap0, chrom, offset, probs=probs0) if start <= v.pos <= end)
         vars_hap1 = list(v for v in vcf.aln_to_vars(refseq, hap1, chrom, offset, probs=probs1) if start <= v.pos <= end)
+        for v in vars_hap0 + vars_hap1:
+            v.clspred = clspred[v.pos - offset]
         #print(f"Offset: {offset}\twindow {start}-{end} frame: {start % 4} hap0: {vars_hap0}\n       hap1: {vars_hap1}")
         #calledvars.append((vars_hap0, vars_hap1))
         calledvars.append((vars_hap0[0:5], vars_hap1[0:5]))
