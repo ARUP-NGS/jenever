@@ -255,8 +255,8 @@ def calc_val_accuracy(loader, model, criterion):
             swap_tot += swaps
 
             # Compute binary classification accuracy metrics
-            tnpreds = torch.sigmoid(tn_logits) 
-            prec, recall, f1, _ = metrics.precision_recall_fscore_support(tgt_cls.cpu().numpy(), tnpreds.cpu().numpy(), average='binary')
+            tnpreds = torch.sigmoid(tn_logits) > 0.5
+            prec, recall, f1, _ = metrics.precision_recall_fscore_support(tgt_cls.detach().cpu().numpy(), tnpreds.detach().cpu().numpy(), average='binary')
             tot_precision += prec
             tot_recall += recall
             tot_f1 += f1
