@@ -619,7 +619,9 @@ def train(output_model, **kwargs):
 
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
+ 
     val_loader = loader.TruncateDepthLoader(val_loader, model_unwrapped.read_depth)
+
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
