@@ -27,12 +27,12 @@ from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
 
-LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
+LOG_FORMAT  ='call formatter: [%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
 
 class CustomFormatter(logging.Formatter):
     def format(self, record):
         if record.levelno == logging.ERROR:
-            self._style._fmt = '[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s (line: %(lineno)d)'
+            self._style._fmt = 'call formatter: [%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s (line: %(lineno)d)'
         else:
             self._style._fmt = LOG_FORMAT
         return super().format(record)
