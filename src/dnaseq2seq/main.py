@@ -14,11 +14,15 @@ from dnaseq2seq import loader as loader
 from dnaseq2seq import __version__ as VERSION
 from dnaseq2seq import util as util
 
+
+LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s '
+
+
 logging.basicConfig(format='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s',
                     datefmt='%m-%d %H:%M:%S',
                     level=os.environ.get('JV_LOGLEVEL', logging.INFO),
                     handlers=[
-                        logging.StreamHandler(),  # Output logs to stdout
+                        logging.StreamHandler(),
                     ])
 
 logger = logging.getLogger(__name__)

@@ -41,6 +41,8 @@ handler = logging.StreamHandler()
 handler.setFormatter(CustomFormatter(LOG_FORMAT))
 
 logger = logging.getLogger(__name__)
+logger.handlers = []
+
 logger.addHandler(handler)
 logger.setLevel(getattr(logging, os.environ.get('JV_LOGLEVEL', 'INFO').upper(), logging.INFO))
 
