@@ -25,6 +25,7 @@ INDEX_TO_BASE = [
     'A', 'C', 'G', 'T'
 ]
 
+BASE_TO_INDEX = {b: i for i, b in enumerate(INDEX_TO_BASE)}
 
 def make_kmer_lookups(size):
     """
@@ -48,6 +49,36 @@ KMER_COUNT = 4 ** TGT_KMER_SIZE
 FEATURE_DIM = KMER_COUNT + 4 # Add 4 to make it 260, which is evenly divisible by lots of numbers - needed for MHA
 START_TOKEN = torch.zeros((1, FEATURE_DIM),  dtype=float)
 START_TOKEN[:, FEATURE_DIM-1] = 1
+
+
+def make_kmer_to_onehot_lookup():
+    """
+    Generate a lookup table for kmer to one-hot encoding
+    """
+    table = []
+    for i in range(KMER_COUNT):
+        onehot = torch.zeros(TGT_KMER_SIZE * 4, dtype=torch.float)
+        seq = i2s[i]
+        for j, base in enumerate(seq):
+            onehot[j * 4 + BASE_TO_INDEX[base]] = 1
+        table.append(onehot)
+    return torch.stack(table, dim=0)
+
+# KMER_TO_ONEHOT is a lookup table for kmer index to one-hot encoding
+# So accessing the ith element of KMER_TO_ONEHOT will return the base-level one-hot encoding for the kmer i
+KMER_TO_ONEHOT = make_kmer_to_onehot_lookup()
+
+def kmer_idx_to_onehot(tgt_kmers_idx):
+    """
+    Convert a list of kmer-indices into a single flattened vector representing a one-hot encoding of the actual bases represnted in each kmer
+    So if the kmer input list has a single element, the result will be a vector of length 16, where the first 4 elements are the one-hot 
+    encoding of the first base, the next 4 are the one-hot encoding of the second base, etc.
+    In general the output will be a vector of length 16 * len(tgt_kmers_idx)
+    """
+    onehots = []
+    for i in range(tgt_kmers_idx.shape[0]):
+        onehots.append(KMER_TO_ONEHOT[tgt_kmers_idx[i]])
+    return torch.concat(onehots, dim=0)
 
 
 def format_bp(bp):
@@ -358,6 +389,12 @@ def kmer_preds_to_seq(preds, i2s):
 def kmer_idx_to_str(kmer_idx, i2s):
     return ''.join(i2s[i] for i in kmer_idx)
 
+def str_to_kmer_idx(seq):
+    """
+    Convert a sequence of bases into kmer indices
+    """
+    assert len(seq) % TGT_KMER_SIZE == 0, f"Sequence length {len(seq)} must be divisible by {TGT_KMER_SIZE}"
+    return torch.tensor([s2i[seq[i:i+TGT_KMER_SIZE]] for i in range(0, len(seq), TGT_KMER_SIZE)])
 
 def bases_to_kvec(bases, s2i, kmersize=4):
     """

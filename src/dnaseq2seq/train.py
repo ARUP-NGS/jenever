@@ -77,13 +77,14 @@ def compute_twohap_loss(preds, tgt, criterion):
 def tgt_kmer_idx_to_onehot(tgt_kmer_idx):
     result = []
     for b in range(tgt_kmer_idx.shape[0]):
-        h0 = bam.seq_to_onehot(util.kmer_idx_to_str(tgt_kmer_idx[b, 0, :], util.i2s))
-        h1 = bam.seq_to_onehot(util.kmer_idx_to_str(tgt_kmer_idx[b, 1, :], util.i2s))
+        h0 = util.kmer_idx_to_onehot(tgt_kmer_idx[b, 0, :])
+        h1 = util.kmer_idx_to_onehot(tgt_kmer_idx[b, 1, :])
         result.append(torch.stack((h0, h1), dim=1).T)
     
     # Result has dimension [batch, hap, seq]
     return torch.stack(result, dim=0)
             
+
 def info_nce_loss(feats_a, feats_b, temperature=0.1):
     assert feats_a.shape == feats_b.shape, f"feats_a.shape {feats_a.shape} != feats_b.shape {feats_b.shape}"
     # Normalize features
@@ -99,6 +100,7 @@ def info_nce_loss(feats_a, feats_b, temperature=0.1):
     # Compute InfoNCE loss
     loss = F.cross_entropy(similarity_matrix, labels)
     return loss
+
 
 def train_n_samples(model, hap_embedder, cls_embedder, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
     """
