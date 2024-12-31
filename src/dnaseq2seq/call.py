@@ -27,24 +27,8 @@ from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
 
-LOG_FORMAT  ='call formatter: [%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
-
-class CustomFormatter(logging.Formatter):
-    def format(self, record):
-        if record.levelno == logging.ERROR:
-            self._style._fmt = 'call formatter: [%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s (line: %(lineno)d)'
-        else:
-            self._style._fmt = LOG_FORMAT
-        return super().format(record)
-    
-handler = logging.StreamHandler()
-handler.setFormatter(CustomFormatter(LOG_FORMAT))
 
 logger = logging.getLogger(__name__)
-logger.handlers = []
-
-logger.addHandler(handler)
-logger.setLevel(getattr(logging, os.environ.get('JV_LOGLEVEL', 'INFO').upper(), logging.INFO))
 
 DEVICE = torch.device("cuda") if hasattr(torch, 'cuda') and torch.cuda.is_available() else torch.device("cpu")
 
@@ -907,6 +891,7 @@ def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, enable_amp=T
     at once
     """
     seq_preds = None
+    cls_preds = None
     probs = None
     start = 0
     
@@ -916,16 +901,24 @@ def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, enable_amp=T
         with torch.amp.autocast(device_type='cuda', enabled=enable_amp):
             preds, prbs, clspred = util.predict_sequence(encoded_reads[start:end, :, :, :].to(DEVICE).float(), model,
                                             n_output_toks=n_output_toks, device=DEVICE)
+        
+        clspred = clspred.squeeze(-1)
+        assert len(clspred) == preds.shape[0]
+        
         if seq_preds is None:
             seq_preds = preds
+            cls_preds = clspred
         else:
             seq_preds = torch.concat((seq_preds, preds), dim=0)
+            cls_preds = torch.concat((cls_preds, clspred), dim=0)
+            
         if probs is None:
             probs = prbs.detach().cpu().numpy()
         else:
             probs = np.concatenate((probs, prbs.detach().cpu().numpy()), axis=0)
         start += max_batch_size
-    return seq_preds, probs, clspred.cpu().numpy()
+    
+    return seq_preds, probs, cls_preds.cpu().numpy()
 
 
 def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks, max_batch_size):
@@ -940,8 +933,12 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
 
     seq_preds, probs, clspred = _call_safe(encoded_reads, model, n_output_toks, max_batch_size)
 
+    assert seq_preds.shape[0] == clspred.shape[0], f"BEFORE: Predictions and cls preds are not the same size! seq_preds shape: {seq_preds.shape} clspred.shape: {clspred.shape}, regions: {regions}"
+
     # convert clspred logits to probabilities
     clspred = np.exp(clspred)
+    
+    assert seq_preds.shape[0] == clspred.shape[0], f"AFTER: Predictions and cls preds are not the same size! seq_preds shape: {seq_preds.shape} clspred.shape: {clspred.shape}, regions: {regions}"
 
     calledvars = []
     for offset, (chrom, start, end), b in zip(offsets, regions, range(len(seq_preds))):
@@ -950,7 +947,12 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
         hap1 = util.kmer_preds_to_seq(hap1_t, util.i2s)
         probs0 = np.exp(util.expand_to_bases(probs[b, 0, :]))
         probs1 = np.exp(util.expand_to_bases(probs[b, 1, :]))
-        tnpred = clspred[b].item() # This will need to change if clspred returns more than one value per region
+
+        try:
+            tnpred = clspred[b].item() # This will need to change if clspred returns more than one value per region
+        except Exception as ex:
+            logger.error(f"Exception accessing clspred, index is: {b}, clspred shape: {clspred.shape}, seq_pred length: {len(seq_preds)}")
+            raise ex
 
         refseq = reference.fetch(chrom, offset, offset + len(hap0))
         vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, hap0, chrom, offset, probs=probs0) if start <= v.pos <= end)

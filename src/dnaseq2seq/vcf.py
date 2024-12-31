@@ -386,7 +386,7 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
         vcfvars_hap0[var].genotype = (1, 1)
         vcfvars_hap0[var].het = False
         vcfvars_hap0[var].window_offset = sorted(set(vcfvars_hap0[var].window_offset + vcfvars_hap1[var].window_offset))
-        vcfvars_hap0[var].tnpred = np.mean(x for x in vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred)
+        vcfvars_hap0[var].tnpred = list(x for x in vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred)
         # then remove from hap1 vars
         vcfvars_hap1.pop(var)
 

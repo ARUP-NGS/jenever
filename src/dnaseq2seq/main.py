@@ -18,7 +18,7 @@ from dnaseq2seq import util as util
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s '
 
 
-logging.basicConfig(format='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s',
+logging.basicConfig(format=LOG_FORMAT,
                     datefmt='%m-%d %H:%M:%S',
                     level=os.environ.get('JV_LOGLEVEL', logging.INFO),
                     handlers=[
