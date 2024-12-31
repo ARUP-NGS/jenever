@@ -74,7 +74,12 @@ def compute_twohap_loss(preds, tgt, criterion):
 
     return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
 
-def tgt_kmer_idx_to_onehot(tgt_kmer_idx):
+def single_tgt_kmer_idx_to_onehot(tgt_kmer_idx):
+    h0 = util.kmer_idx_to_onehot(tgt_kmer_idx[0, :])
+    h1 = util.kmer_idx_to_onehot(tgt_kmer_idx[1, :])
+    return torch.stack((h0, h1), dim=1).T
+
+def batch_tgt_kmer_idx_to_onehot(tgt_kmer_idx):
     result = []
     for b in range(tgt_kmer_idx.shape[0]):
         h0 = util.kmer_idx_to_onehot(tgt_kmer_idx[b, 0, :])
@@ -121,7 +126,9 @@ def train_n_samples(model, hap_embedder, cls_embedder, optimizer, criterion, loa
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_kmers_input.shape[-2]).to(DEVICE)
 
         # Create one-hot seq vectors for every target haplotype
-        tgt_onehot = tgt_kmer_idx_to_onehot(tgt_expected).float().to(DEVICE)
+        # test_vmap = torch.vmap(single_tgt_kmer_idx_to_onehot)(tgt_expected.to(DEVICE))
+
+        tgt_onehot = batch_tgt_kmer_idx_to_onehot(tgt_expected).float().to(DEVICE)
 
         optimizer.zero_grad()
         logger.debug("Forward pass...")
