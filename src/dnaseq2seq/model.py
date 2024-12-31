@@ -125,6 +125,8 @@ class VarTransformer(nn.Module):
         self.decoder_embed_dim = decoder_embed_dim
         self.embed_dim = encoder_attention_heads * embed_dim_factor
         self.fc1_hidden = 12
+        self.cls_token = torch.zeros((1,feature_count)).to(device)
+        self.cls_token[:, 0:4] = 1
 
         self.fc1 = nn.Linear(feature_count, self.fc1_hidden)
         self.fc2 = nn.Linear(self.read_depth * self.fc1_hidden, self.embed_dim)
@@ -162,13 +164,17 @@ class VarTransformer(nn.Module):
 
 
     def encode(self, src):
+        src = torch.cat((self.cls_token.unsqueeze(0).repeat(src.shape[0], 1, src.shape[2], 1), src), dim=1)
+
         src = F.gelu(self.fc1(src)) # Operates on each "feature" (10 feature encoded base)
         src = self.pos_encoder(src)  # For 2D encoding we have to do this before flattening, right?
         src = src.flatten(start_dim=2)
         src = F.gelu(self.fc2(src)) # Operates on an entire alignment column
         src = self.emb_dropout(self.emb_layernorm(src))
         mem = self.encoder(src)
-        return mem
+
+        cls_emb = mem[:, 0, :]
+        return mem, cls_emb
 
     def decode(self, mem, tgt, tgt_mask, tgt_key_padding_mask=None):
         mem_proj = self.converter(mem)
@@ -196,7 +202,47 @@ class VarTransformer(nn.Module):
         return torch.stack((h0, h1), dim=1)
 
     def forward(self, src, tgt, tgt_mask, tgt_key_padding_mask=None):
-        mem = self.encode(src)
+        mem, cls_emb = self.encode(src)
         result = self.decode(mem, tgt.float(), tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
-        return result
+        return result, cls_emb
 
+
+class HapEmbedder(nn.Module):
+    def __init__(self, hap_dim, embed_dim, device='cpu', p_dropout=0.1):
+        super().__init__()
+        self.hap_dim = hap_dim
+        self.embed_dim = embed_dim
+        self.device = device
+        self.hidden_dim = 128
+        self.emb = nn.Sequential(
+            nn.Linear(hap_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Dropout(p_dropout),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Dropout(p_dropout),
+            nn.Linear(self.hidden_dim, self.embed_dim)
+        )
+    
+    def forward(self, hap_onehots):
+        assert hap_onehots.shape[1] == 2, f"Expected hap_onehots to have shape (batch_size, 2, hap_dim), got {hap_onehots.shape}"
+        hap1 = self.emb(hap_onehots[:, 0, :])
+        hap2 = self.emb(hap_onehots[:, 1, :])
+        return (hap1 + hap2) / 2.0
+    
+
+class CLSEmbedder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, device='cpu', p_dropout=0.1):
+        super().__init__()
+        self.device = device
+        self.hidden_dim = hidden_dim
+        self.emb = nn.Sequential(
+            nn.Linear(input_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, output_dim)
+        )
+
+    def forward(self, x):
+        return self.emb(x)

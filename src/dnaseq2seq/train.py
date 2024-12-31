@@ -14,13 +14,15 @@ from torch import nn
 import torch.distributed as dist
 from torch.cuda.amp import GradScaler
 import torch.cuda.amp as amp
+import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 from dnaseq2seq import vcf
 from dnaseq2seq import loader
 from dnaseq2seq import util
-from dnaseq2seq.model import VarTransformer
+from dnaseq2seq import bam
+from dnaseq2seq.model import VarTransformer, HapEmbedder, CLSEmbedder
 from dnaseq2seq import loggers
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
@@ -72,18 +74,43 @@ def compute_twohap_loss(preds, tgt, criterion):
 
     return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
 
+def tgt_kmer_idx_to_onehot(tgt_kmer_idx):
+    result = []
+    for b in range(tgt_kmer_idx.shape[0]):
+        h0 = bam.seq_to_onehot(util.kmer_idx_to_str(tgt_kmer_idx[b, 0, :], util.i2s))
+        h1 = bam.seq_to_onehot(util.kmer_idx_to_str(tgt_kmer_idx[b, 1, :], util.i2s))
+        result.append(torch.stack((h0, h1), dim=1).T)
+    
+    # Result has dimension [batch, hap, seq]
+    return torch.stack(result, dim=0)
+            
+def info_nce_loss(feats_a, feats_b, temperature=0.1):
+    assert feats_a.shape == feats_b.shape, f"feats_a.shape {feats_a.shape} != feats_b.shape {feats_b.shape}"
+    # Normalize features
+    feats_a = F.normalize(feats_a, dim=1)
+    feats_b = F.normalize(feats_b, dim=1)
+    
+    # Compute similarity matrix
+    similarity_matrix = torch.matmul(feats_a, feats_b.T) / temperature
+    
+    # Create labels for positive pairs
+    labels = torch.arange(feats_a.size(0)).to(feats_a.device)
+    
+    # Compute InfoNCE loss
+    loss = F.cross_entropy(similarity_matrix, labels)
+    return loss
 
-
-def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
+def train_n_samples(model, hap_embedder, cls_embedder, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
     """
     Train until we've seen more than 'num_samples' from the loader, then return the loss
     """
     samples_seen = 0
     loss_sum = 0
     model.train()
-    scaler = GradScaler(enabled=enable_amp)
+    scaler = torch.amp.GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
+    hap_nce_loss_weight = 0.1
     for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
@@ -91,14 +118,24 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         tgt_expected = tgt_kmer_idx[:, :, 1:]
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_kmers_input.shape[-2]).to(DEVICE)
 
+        # Create one-hot seq vectors for every target haplotype
+        tgt_onehot = tgt_kmer_idx_to_onehot(tgt_expected).float().to(DEVICE)
+
         optimizer.zero_grad()
         logger.debug("Forward pass...")
 
-        with amp.autocast(enabled=enable_amp): # dtype is bfloat16 by default
-            seq_preds = model(src, tgt_kmers_input, tgt_mask)
+        with torch.amp.autocast(enabled=enable_amp, device_type=DEVICE.type): # dtype is bfloat16 by default
+            seq_preds, cls_emb = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
-            loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+            hap_loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+
+            hap_embeddings = hap_embedder(tgt_onehot)
+            cls_embeddings = cls_embedder(cls_emb)
+            loss_nce = info_nce_loss(hap_embeddings, cls_embeddings)
+            loss = hap_loss + hap_nce_loss_weight * loss_nce
+            
+
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -116,7 +153,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         if batch % 10 == 0:
             elapsed = time.perf_counter() - start
             samples_per_sec = samples_perf / elapsed
-            logger.info(f"Batch {batch}  samples: {samples_seen}   loss: {loss.item():.3f}   swaps: {swaps}   samples/sec: {samples_per_sec :.2f}")
+            logger.info(f"Batch {batch}  samples: {samples_seen}   hap loss: {hap_loss.item():.3f}   nce loss: {loss_nce.item():.3f}  samples/sec: {samples_per_sec :.2f}")
             start = time.perf_counter()
             samples_perf = 0
 
@@ -348,8 +385,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
@@ -365,6 +402,8 @@ def load_model(modelconf, ckpt):
 
 
 def train_epochs(model,
+                 hap_embedder,
+                 cls_embedder,
                  optimizer,
                  epochs,
                  dataloader,
@@ -406,12 +445,14 @@ def train_epochs(model,
             starttime = datetime.now()
             assert samples_per_epoch > 0, "Must have positive number of samples per epoch"
             loss = train_n_samples(model,
-                              optimizer,
-                              criterion,
-                              sample_iter,
-                              samples_per_epoch,
-                              scheduler,
-                              enable_amp=True)
+                                   hap_embedder,
+                                   cls_embedder,
+                                    optimizer,
+                                    criterion,
+                                    sample_iter,
+                                    samples_per_epoch,
+                                    scheduler,
+                                    enable_amp=True)
 
             elapsed = datetime.now() - starttime
 
@@ -468,6 +509,8 @@ def train_epochs(model,
                 m = model.module if (isinstance(model, nn.DataParallel) or isinstance(model, DDP)) else model
                 ckpt_data = {
                     'model': m.state_dict(),
+                    'hap_embedder': hap_embedder.state_dict(),
+                    'cls_embedder': cls_embedder.state_dict(),
                     'conf': xtra_checkpoint_items,
                     'opt': optimizer.state_dict(),
                 }
@@ -640,7 +683,12 @@ def train(output_model, **kwargs):
         lr_decay_iters=kwargs.get('lr_decay_iters', 20e6),
     )
 
+    hap_embedder = HapEmbedder(hap_dim=(4*148), embed_dim=model.embed_dim, device=DEVICE)
+    cls_embedder = CLSEmbedder(input_dim=model.embed_dim, hidden_dim=128, output_dim=model.embed_dim, device=DEVICE)
+
     train_epochs(model,
+                 hap_embedder,
+                 cls_embedder,
                  optimizer,
                  kwargs.get('epochs'),
                  dataloader,

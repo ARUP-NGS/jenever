@@ -155,6 +155,10 @@ def base_index(base):
         return 3
     raise ValueError(f"Expected [ACTG], got {base}")
 
+def base_onehot(base):
+    t = torch.zeros(4, dtype=torch.int8)
+    update_from_base(base, t)
+    return t
 
 def update_from_base(base, tensor):
     if base == 'A':
@@ -171,6 +175,8 @@ def update_from_base(base, tensor):
         tensor[0:4] = 0
     return tensor
 
+def seq_to_onehot(seq):
+    return torch.concat([base_onehot(b) for b in seq], dim=0)
 
 def encode_basecall(base, qual, consumes_ref_base, consumes_read_base, strand, clipped, mapq):
     ebc = torch.zeros(10).char() # Char is a signed 8-bit integer, so ints from -128 - 127 only
