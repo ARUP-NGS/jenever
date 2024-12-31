@@ -110,7 +110,7 @@ def train_n_samples(model, hap_embedder, cls_embedder, optimizer, criterion, loa
     scaler = torch.amp.GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
-    hap_nce_loss_weight = 0.1
+    hap_nce_loss_weight = 0.25
     for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
@@ -124,7 +124,7 @@ def train_n_samples(model, hap_embedder, cls_embedder, optimizer, criterion, loa
         optimizer.zero_grad()
         logger.debug("Forward pass...")
 
-        with torch.amp.autocast(enabled=enable_amp, device_type=DEVICE.type): # dtype is bfloat16 by default
+        with torch.amp.autocast(enabled=enable_amp, device_type=model.device.type): # dtype is bfloat16 by default
             seq_preds, cls_emb = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
@@ -385,20 +385,29 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    # logger.info("Compiling model...")
-    # model = torch.compile(model)
+    logger.info("Compiling model...")
+    model = torch.compile(model)
     
+    hap_embedder = HapEmbedder(hap_dim=(4*148), embed_dim=model.embed_dim, device=DEVICE)
+    cls_embedder = CLSEmbedder(input_dim=model.embed_dim, hidden_dim=128, output_dim=model.embed_dim, device=DEVICE)
+
+
     if USE_DDP:
         rank = dist.get_rank()
         device_id = rank % torch.cuda.device_count()
         logger.info(f"Creating DDP model with rank {rank} and device_id: {device_id}")
         model = model.to(device_id)
         model = DDP(model, device_ids=[device_id])
+        hap_embedder = DDP(hap_embedder.to(device_id), device_ids=[device_id])
+        cls_embedder = DDP(cls_embedder.to(device_id), device_ids=[device_id])
     else:
         model = model.to(DEVICE)
+        hap_embdder = hap_embedder.to(DEVICE)
+        cls_embedder = cls_embedder.to(DEVICE)
 
     model.train()
-    return model
+
+    return model, hap_embedder, cls_embedder
 
 
 def train_epochs(model,
@@ -644,7 +653,7 @@ def train(output_model, **kwargs):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
     else:
         ckpt = None
-    model = load_model(kwargs['model'], ckpt)
+    model, hap_embedder, cls_embedder = load_model(kwargs['model'], ckpt)
 
     model_unwrapped = unwrap_model(model)
 
@@ -682,9 +691,6 @@ def train(output_model, **kwargs):
         warmup_iters=kwargs.get('lr_warmup_iters', 1e6),
         lr_decay_iters=kwargs.get('lr_decay_iters', 20e6),
     )
-
-    hap_embedder = HapEmbedder(hap_dim=(4*148), embed_dim=model.embed_dim, device=DEVICE)
-    cls_embedder = CLSEmbedder(input_dim=model.embed_dim, hidden_dim=128, output_dim=model.embed_dim, device=DEVICE)
 
     train_epochs(model,
                  hap_embedder,
