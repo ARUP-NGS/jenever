@@ -126,9 +126,8 @@ def train_n_samples(model, hap_embedder, cls_embedder, optimizer, criterion, loa
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_kmers_input.shape[-2]).to(DEVICE)
 
         # Create one-hot seq vectors for every target haplotype
-        # test_vmap = torch.vmap(single_tgt_kmer_idx_to_onehot)(tgt_expected.to(DEVICE))
-
-        tgt_onehot = batch_tgt_kmer_idx_to_onehot(tgt_expected).float().to(DEVICE)
+        tgt_onehot = torch.vmap(single_tgt_kmer_idx_to_onehot)(tgt_expected.to(DEVICE))
+        # tgt_onehot = batch_tgt_kmer_idx_to_onehot(tgt_expected).float().to(DEVICE)
 
         optimizer.zero_grad()
         logger.debug("Forward pass...")

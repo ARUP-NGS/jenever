@@ -75,10 +75,7 @@ def kmer_idx_to_onehot(tgt_kmers_idx):
     encoding of the first base, the next 4 are the one-hot encoding of the second base, etc.
     In general the output will be a vector of length 16 * len(tgt_kmers_idx)
     """
-    onehots = []
-    for i in range(tgt_kmers_idx.shape[0]):
-        onehots.append(KMER_TO_ONEHOT[tgt_kmers_idx[i]])
-    return torch.concat(onehots, dim=0)
+    return KMER_TO_ONEHOT[tgt_kmers_idx].flatten()
 
 
 def format_bp(bp):
