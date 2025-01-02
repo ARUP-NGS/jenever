@@ -1,4 +1,6 @@
 
+This is new
+
 ## NGS Variant detection with Generative Haplotype Prediction
 
 This repo contains code for detecting variants from next-generation sequencing data (BAM / CRAM files)
