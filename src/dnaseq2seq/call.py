@@ -923,8 +923,8 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
         hap0_t, hap1_t = seq_preds[b, 0, :, :], seq_preds[b, 1, :, :]
         hap0 = util.kmer_preds_to_seq(hap0_t, util.i2s)
         hap1 = util.kmer_preds_to_seq(hap1_t, util.i2s)
-        probs0 = np.exp(util.expand_to_bases(probs[b, 0, :]))
-        probs1 = np.exp(util.expand_to_bases(probs[b, 1, :]))
+        probs0 = util.expand_to_bases(probs[b, 0, :]) # With standard cross-entropy loss the model outputs probabilities for each kmer
+        probs1 = util.expand_to_bases(probs[b, 1, :])
 
         refseq = reference.fetch(chrom, offset, offset + len(hap0))
         vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, hap0, chrom, offset, probs=probs0) if start <= v.pos <= end)

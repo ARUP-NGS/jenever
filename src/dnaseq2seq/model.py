@@ -11,6 +11,43 @@ import math
 
 logger = logging.getLogger(__name__)
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SwiGLU(nn.Module):
+    """
+    Implementation of SwiGLU activation function from the paper:
+    "GLU Variants Improve Transformer" https://arxiv.org/abs/2002.05202
+    
+    SwiGLU(x) = Swish(xW + b1) ⊗ (xV + b2)
+    where Swish(x) = x * sigmoid(βx)
+    """
+    def __init__(self, in_features, hidden_features=None, beta=1.0):
+        super().__init__()
+        hidden_features = hidden_features or in_features
+        self.w_gate = nn.Linear(in_features, hidden_features)
+        self.w_linear = nn.Linear(in_features, hidden_features)
+        self.beta = beta
+
+    def swish(self, x):
+        return x * torch.sigmoid(self.beta * x)
+    
+    def forward(self, x):
+        gate = self.swish(self.w_gate(x))
+        linear = self.w_linear(x)
+        return gate * linear
+
+
+class IBlowUp(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.lin = nn.Linear(12, 13)
+
+    def forward(self, x):
+        raise Exception("IBlowUp should not be used")
+        return self.lin(x)
+
 class PositionalEncoding2D(nn.Module):
 
     def __init__(self, channels, device):
@@ -139,7 +176,8 @@ class VarTransformer(nn.Module):
             dim_feedforward=d_ff,
             dropout=p_dropout,
             batch_first=True,
-            activation='gelu')
+            activation=SwiGLU(in_features=d_ff))
+        
         self.encoder = nn.TransformerEncoder(encoder_layers, num_layers=n_encoder_layers)
 
         decoder_layers = nn.TransformerDecoderLayer(
@@ -149,6 +187,8 @@ class VarTransformer(nn.Module):
             dropout=p_dropout,
             batch_first=True,
             activation='gelu')
+        # Note: activation here is IGNORED by the TransformerDecoderLayer for reasons that seem buggy 
+        # The __setstate__ method is implemented in a way that seems to always use the default activation, which is relu
 
         self.tgt_input_converter = nn.Linear(self.kmer_dim, self.decoder_embed_dim)
         self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
@@ -156,7 +196,14 @@ class VarTransformer(nn.Module):
         self.decode_output_converter0 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
         self.decode_output_converter1 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
 
-        self.softmax = nn.LogSoftmax(dim=-1)
+        # In what feels like a bug, setting the activation in the decoder layers does not work
+        # So we have to set it manually here
+        for layer in self.decoder0.layers:
+            layer.activation = SwiGLU(in_features=d_ff)
+        for layer in self.decoder1.layers:
+            layer.activation = SwiGLU(in_features=d_ff)
+
+        self.softmax = nn.Softmax(dim=-1)
         self.emb_layernorm = nn.LayerNorm(self.embed_dim)
         self.emb_dropout = nn.Dropout(p_dropout)
 

@@ -348,8 +348,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
@@ -378,7 +378,7 @@ def train_epochs(model,
 ):
 
 
-    criterion = nn.NLLLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     trainlogpath = str(model_dest).replace(".model", "").replace(".pt", "") + "_train.log"
     logger.info(f"Training log data will be saved at {trainlogpath}")
