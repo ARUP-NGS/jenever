@@ -1,4 +1,3 @@
-
 import os
 import time
 
@@ -11,7 +10,7 @@ from collections import defaultdict
 
 from functools import partial
 from pathlib import Path
-from typing import List, Callable
+from typing import List, Callable, Tuple
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
@@ -27,24 +26,7 @@ from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
 
-LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
-
-class CustomFormatter(logging.Formatter):
-    def format(self, record):
-        if record.levelno == logging.ERROR:
-            self._style._fmt = '[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s (line: %(lineno)d)'
-        else:
-            self._style._fmt = LOG_FORMAT
-        return super().format(record)
-    
-handler = logging.StreamHandler()
-handler.setFormatter(CustomFormatter(LOG_FORMAT))
-
 logger = logging.getLogger(__name__)
-logger.handlers = []
-
-logger.addHandler(handler)
-logger.setLevel(getattr(logging, os.environ.get('JV_LOGLEVEL', 'INFO').upper(), logging.INFO))
 
 DEVICE = torch.device("cuda") if hasattr(torch, 'cuda') and torch.cuda.is_available() else torch.device("cpu")
 
@@ -401,6 +383,76 @@ def find_regions(regionq, inputbed, bampath, refpath, n_signals, show_progress, 
         progbar.close()
 
 
+
+def add_ref_bases(encbases, reference, chrom, start, end, max_read_depth):
+    """
+    Add the reference sequence as read 0
+    """
+    refseq = reference.fetch(chrom, start, end)
+    ref_encoded = bam.string_to_tensor(refseq)
+    return torch.cat((ref_encoded.unsqueeze(1), encbases), dim=1)[:, 0:max_read_depth, :]
+
+
+def encode_single_region(aln, reference, chrom, start, end, max_read_depth, window_size=150, min_reads=5, batch_size=64, window_step=25):
+    """
+    Generate batches of tensors that encode read data from the given genomic region, along with position information. Each
+    batch of tensors generated should be suitable for input into a forward pass of the model - but the data will be on the
+    CPU.
+    Each item in the batch represents a pileup in a single 'window' into the given region of size 'window_size', and
+    subsequent elements are encoded from a sliding window that advances by 'window_step' after each item.
+    If start=100, window_size is 50, and window_step is 10, then the items will include data from regions:
+    100-150
+    110-160
+    120-170,
+    etc
+
+    The start positions for each item in the batch are returned in the 'batch_offsets' element, which is required
+    when variant calling to determine the genomic coordinates of the called variants.
+
+    If the full region size is small this will probably generate just a single batch, but if the region is very large
+    (or batch_size is small) this could generate multiple batches
+
+    :param window_size: Size of region in bp to generate for each item
+    :returns: Generator for tuples of (batch tensor, list of start positions)
+    """
+    window_start = int(start - 0.7 * window_size)  # We start with regions a bit upstream of the focal / target region
+    batch = []
+    batch_offsets = []
+    readwindow = bam.ReadWindow(aln, chrom, start - 150, end + window_size)
+    logger.debug(f"Encoding region {chrom}:{start}-{end}")
+    returned_count = 0
+    while window_start <= (end - 0.2 * window_size):
+        try:
+            #logger.debug(f"Getting reads from  readwindow: {window_start} - {window_start + window_size}")
+            enc_reads = readwindow.get_window(window_start, window_start + window_size, max_reads=max_read_depth)
+            encoded_with_ref = add_ref_bases(enc_reads, reference, chrom, window_start, window_start + window_size,
+                                             max_read_depth=max_read_depth)
+            batch.append(encoded_with_ref)
+            batch_offsets.append(window_start)
+            #logger.debug(f"Added item to batch from window_start {window_start}")
+        except bam.LowReadCountException:
+            logger.debug(
+                f"Bam window {chrom}:{window_start}-{window_start + window_size} "
+                f"had too few reads for variant calling (< {min_reads})"
+            )
+        window_start += window_step
+        if len(batch) >= batch_size:
+            encodedreads = torch.stack(batch, dim=0).cpu()
+            returned_count += 1
+            yield encodedreads, batch_offsets
+            batch = []
+            batch_offsets = []
+
+    # Last few
+    if batch:
+        encodedreads = torch.stack(batch, dim=0).cpu() # Keep encoded tensors on cpu for now
+        returned_count += 1
+        yield encodedreads, batch_offsets
+
+    if not returned_count:
+        logger.debug(f"Region {chrom}:{start}-{end} has only low coverage areas, not encoding data")
+
+
 def encode_region(bampath, refpath, idxregion, max_read_depth, window_size, min_reads, batch_size, window_step):
     """
     Encode the reads in the given region and save the data along with the region and start offsets to a file
@@ -412,7 +464,7 @@ def encode_region(bampath, refpath, idxregion, max_read_depth, window_size, min_
     reference = pysam.FastaFile(refpath)
     all_encoded = []
     all_starts = []
-    for encoded_region, start_positions in _encode_region(aln, reference, idxregion.chrom, idxregion.start, idxregion.end, max_read_depth,
+    for encoded_region, start_positions in encode_single_region(aln, reference, idxregion.chrom, idxregion.start, idxregion.end, max_read_depth,
                                                      window_size=window_size, min_reads=min_reads, batch_size=batch_size, window_step=window_step):
         all_encoded.append(encoded_region)
         all_starts.extend(start_positions)
@@ -455,8 +507,6 @@ def generate_tensors(region_queue: mp.Queue, output_queue: mp.Queue, bampath, re
             output_queue.put(CallingStopSignal(regions_submitted=encoded_region_count, sus_region_count=region.tot_sus_regions, sus_region_bp=region.tot_sus_bp))
             break
         else:
-
-            reg = (region.chrom, region.start, region.end)
             data = encode_region(bampath, refpath, region, max_read_depth, window_size, min_reads, batch_size=batch_size, window_step=window_step)
             if data is not None:
                 data['encoded_pileup'].share_memory_()
@@ -510,9 +560,12 @@ def call_multi_paths(datas, model, refpath, bampath, classifier_model, vcf_templ
     
     allencoded, batch_start_pos, batch_regions = merge_datas(datas)
 
-    hap0, hap1= call_and_merge(allencoded, batch_start_pos, batch_regions, model, reference, max_batch_size)
-
-    var_records.extend(vars_hap_to_records(hap0, hap1, bampath, refpath, classifier_model, vcf_template))
+    window_results = call_and_merge(allencoded, batch_start_pos, batch_regions, model, reference, max_batch_size)
+    
+    for window_result in window_results:
+        window_result.print_genotype_predictions()
+        records = window_result.to_records(bampath, refpath, classifier_model, vcf_template)
+        var_records.extend(records)
 
     call_elapsed = datetime.datetime.now() - call_start
     logger.debug(
@@ -673,6 +726,73 @@ def accumulate_regions_and_call(modelpath: str,
     logger.debug("Calling worker is exiting")
 
 
+
+def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, enable_amp=True):
+    """
+    Predict the sequence for the encoded reads, but dont submit more than 'max_batch_size' samples
+    at once
+    """
+    seq_preds = None
+    clspreds = None
+    probs = None
+    start = 0
+    
+    while start < encoded_reads.shape[0]:
+        end = min(encoded_reads.shape[0]+1, start + max_batch_size)
+        logger.debug(f"Calling batch of size {end - start}")
+        with torch.amp.autocast(device_type='cuda', enabled=enable_amp):
+            preds, prbs, clspred = util.predict_sequence(encoded_reads[start:end, :, :, :].to(DEVICE).float(), model,
+                                            n_output_toks=n_output_toks, device=DEVICE)
+        if seq_preds is None:
+            seq_preds = preds
+            clspreds = clspred
+        else:
+            seq_preds = torch.concat((seq_preds, preds), dim=0)
+            clspreds = torch.concat((clspreds, clspred), dim=0)
+        if probs is None:
+            probs = prbs.detach().cpu().numpy()
+        else:
+            probs = np.concatenate((probs, prbs.detach().cpu().numpy()), axis=0)
+        start += max_batch_size
+    return seq_preds, probs, clspreds
+
+
+def call_batch(encoded_reads, offsets, regions, model, n_output_toks, max_batch_size):
+    """
+    Call variants in a batch (list) of regions, by running a forward pass of the model and
+    then aligning the predicted sequences to the reference genome and picking out any
+    mismatching parts
+    :returns : List of variants called in both haplotypes for every item in the batch as a list of 2-tuples
+    """
+    assert encoded_reads.shape[0] == len(regions), f"Expected the same number of reads as regions, but got {encoded_reads.shape[0]} reads and {len(regions)}"
+    assert len(offsets) == len(regions), f"Should be as many offsets as regions, but found {len(offsets)} and {len(regions)}"
+
+    seq_preds, probs, clspred = _call_safe(encoded_reads, model, n_output_toks, max_batch_size)
+
+    # convert clspred logits to probabilities
+    clspred = torch.sigmoid(clspred).cpu().numpy()
+
+    calledvars = []
+    haps = []
+    for offset, (chrom, start, end), b in zip(offsets, regions, range(len(seq_preds))):
+        hap0_t, hap1_t = seq_preds[b, 0, :, :], seq_preds[b, 1, :, :]
+        hap0 = util.kmer_preds_to_seq(hap0_t, util.i2s)
+        hap1 = util.kmer_preds_to_seq(hap1_t, util.i2s)
+        probs0 = np.exp(util.expand_to_bases(probs[b, 0, :]))
+        probs1 = np.exp(util.expand_to_bases(probs[b, 1, :]))
+        tnpred = clspred[b].item() # This will need to change if clspred returns more than one value per region
+        haps.append({
+            'hap0': hap0,
+            'hap1': hap1, 
+            'probs0': probs0,
+            'probs1': probs1,
+            'tnpred': tnpred,
+            'offset': offset
+        })
+
+    return haps
+
+
 def call_and_merge(batch, batch_offsets, regions, model, reference, max_batch_size):
     """
     Generate haplotypes for the batch, identify variants in each, and then 'merge genotypes' across the overlapping
@@ -718,24 +838,24 @@ def call_and_merge(batch, batch_offsets, regions, model, reference, max_batch_si
         n_output_toks = min(150 // util.TGT_KMER_SIZE - 1, max_dist // util.TGT_KMER_SIZE + 1)
 
         logger.debug(f"Sub-batch size: {len(subbatch_offsets)}   max dist: {max(subbatch_dists)},  n_tokens: {n_output_toks}")
-        batchvars = call_batch(subbatch, subbatch_offsets, subbatch_regions, model, reference, n_output_toks, max_batch_size=max_batch_size)
-        logger.debug(f"Called {len(batchvars)} in {subbatch_regions}")
-        for region, bvars in zip(subbatch_regions, batchvars):
-            byregion[region].append(bvars)
+        batchhaps = call_batch(subbatch, subbatch_offsets, subbatch_regions, model, n_output_toks, max_batch_size=max_batch_size)
+        logger.debug(f"Called {len(batchhaps)} in {subbatch_regions}")
+        
+        for region, bhap in zip(subbatch_regions, batchhaps):
+            byregion[region].append(bhap)
 
-    hap0 = defaultdict(list)
-    hap1 = defaultdict(list)
-    for region, rvars in byregion.items():
-        chrom, start, end = region
-        h0, h1 = resolve_haplotypes(rvars)
-        for k, v in h0.items():
-            if start <= v[0].pos < end:
-                hap0[k].extend(v)
-        for k, v in h1.items():
-            if start <= v[0].pos < end:
-                hap1[k].extend(v)
 
-    return hap0, hap1
+    window_results = []
+    for region, rhaps in byregion.items():
+        genopreds = []  
+        for hap_info in rhaps:
+            gt = GenotypePrediction(region, **hap_info)
+            gt.aln_vars(reference)
+            genopreds.append(gt)
+        
+        window_results.append(WindowResult(region, genopreds))
+
+    return window_results
 
 
 def merge_multialts(v0, v1):
@@ -843,268 +963,182 @@ def collect_phasegroups(vars_hap0, vars_hap1, aln, reference, minimum_safe_dista
     return all_vcf_vars
 
 
-def vars_hap_to_records(vars_hap0, vars_hap1, bampath, refpath, classifier_model, vcf_template):
-    """
-    Convert variant haplotype objects to variant records
-    """
 
-    # Merging vars can sometimes cause a poor quality variant to clobber a very high quality one, to avoid this
-    # we hard-filter out very poor quality variants that overlap other, higher-quality variants
-    # This value defines the min qual to be included when merging overlapping variants
-    min_merge_qual = 0.01
-    global TOTAL_TIME_CLF
-    reference = pysam.FastaFile(refpath)
-    aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
+class GenotypePrediction:
+    """ Two haplotype predictions for a single window,  """
 
-    vcf_vars = collect_phasegroups(vars_hap0, vars_hap1, aln, reference, minimum_safe_distance=100)
+    def __init__(self, region: Tuple[str, int, int], tnpred: float, hap0: str, probs0: np.array, hap1: str, probs1: np.array, offset: int):
+        self.region = region
+        self.tn_prob = tnpred
+        self.offset = offset
+        self.hap0 = hap0
+        self.probs0 = probs0
+        self.hap1 = hap1
+        self.probs1 = probs1
+        self.vars_hap0 = None
+        self.vars_hap1 = None
 
-    # covert variants to pysam vcf records
-    vcf_records = [
-        vcf.create_vcf_rec(var, vcf_template)
-        for var in sorted(vcf_vars, key=lambda x: x.pos)
-    ]
-
-    if not vcf_records:
-        return []
-
-    for rec in vcf_records:
-        rec.info["RAW_QUAL"] = rec.qual
-
-    if classifier_model:
-        clfstart = time.time()
+    def aln_vars(self, reference: pysam.FastaFile):
+        """ Align the haplotypes to the reference genome to create Variant objects """
+        refseq = reference.fetch(self.region[0], self.region[1], self.region[2])
+        vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, self.hap0, self.region[0], self.region[1], probs=self.probs0) if self.region[1] <= v.pos <= self.region[2])
+        vars_hap1 = list(v for v in vcf.aln_to_vars(refseq, self.hap1, self.region[0], self.region[1], probs=self.probs1) if self.region[1] <= v.pos <= self.region[2])
+        for v in vars_hap0:
+            v.tnpred = self.tn_prob
+        for v in vars_hap1:
+            v.tnpred = self.tn_prob
+        self.vars_hap0 = vars_hap0
+        self.vars_hap1 = vars_hap1
         
-        clf_preds = buildclf.predict_records(vcf_records, classifier_model, bampath, refpath, threads=16)
-        for rec, pred in zip(vcf_records, clf_preds):
-            rec.qual = pred
 
-        clfend = time.time()
-        TOTAL_TIME_CLF += clfend - clfstart
-        logger.debug(f"Predicted variant quality for {len(vcf_records)} records in {(clfend - clfstart):6f} seconds ({(clfend - clfstart)/len(vcf_records) :6f} per record)")
-
-    merged = []
-    overlaps = [vcf_records[0]]
-    for rec in vcf_records[1:]:
-        if overlaps and util.records_overlap(overlaps[-1], rec):
-            overlaps.append(rec)
-        elif overlaps:
-            result = merge_overlaps(overlaps, min_qual=min_merge_qual)
-            merged.extend(result)
-            overlaps = [rec]
-        else:
-            overlaps = [rec]
-
-    if overlaps:
-        merged.extend(merge_overlaps(overlaps, min_qual=min_merge_qual))
-    else:
-        merged.append(rec)
-
-    return merged
-
-
-def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, enable_amp=True):
-    """
-    Predict the sequence for the encoded reads, but dont submit more than 'max_batch_size' samples
-    at once
-    """
-    seq_preds = None
-    probs = None
-    start = 0
+class WindowResult:
+    """ Results for a single window """
+    def __init__(self, region: Tuple[str, int, int], genotype_predictions: List[GenotypePrediction]):
+        self.region = region
+        self.genotype_predictions = genotype_predictions
+        self.vars_hap0, self.vars_hap1 = self._resolve_haplotypes()
     
-    while start < encoded_reads.shape[0]:
-        end = min(encoded_reads.shape[0]+1, start + max_batch_size)
-        logger.debug(f"Calling batch of size {end - start}")
-        with torch.amp.autocast(device_type='cuda', enabled=enable_amp):
-            preds, prbs, clspred = util.predict_sequence(encoded_reads[start:end, :, :, :].to(DEVICE).float(), model,
-                                            n_output_toks=n_output_toks, device=DEVICE)
-        if seq_preds is None:
-            seq_preds = preds
-        else:
-            seq_preds = torch.concat((seq_preds, preds), dim=0)
-        if probs is None:
-            probs = prbs.detach().cpu().numpy()
-        else:
-            probs = np.concatenate((probs, prbs.detach().cpu().numpy()), axis=0)
-        start += max_batch_size
-    return seq_preds, probs, clspred.cpu().numpy()
+    def print_genotype_predictions(self):
+        print(f"Region: {self.region}")
+        for i, g in enumerate(self.genotype_predictions):
+            print(f"Genotype {i}: offset {g.offset}")
+            print(g.hap0 + "\t" + ", ".join(str(v) for v in g.vars_hap0))
+            print(g.hap1 + "\t" + ", ".join(str(v) for v in g.vars_hap1))
+    
+    def to_records(self, bampath, refpath, classifier_model, vcf_template):
+        """
+        Convert variant haplotype objects to variant records
+        """
 
+        # Merging vars can sometimes cause a poor quality variant to clobber a very high quality one, to avoid this
+        # we hard-filter out very poor quality variants that overlap other, higher-quality variants
+        # This value defines the min qual to be included when merging overlapping variants
+        min_merge_qual = 0.01
+        global TOTAL_TIME_CLF
+        reference = pysam.FastaFile(refpath)
+        aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
 
-def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks, max_batch_size):
-    """
-    Call variants in a batch (list) of regions, by running a forward pass of the model and
-    then aligning the predicted sequences to the reference genome and picking out any
-    mismatching parts
-    :returns : List of variants called in both haplotypes for every item in the batch as a list of 2-tuples
-    """
-    assert encoded_reads.shape[0] == len(regions), f"Expected the same number of reads as regions, but got {encoded_reads.shape[0]} reads and {len(regions)}"
-    assert len(offsets) == len(regions), f"Should be as many offsets as regions, but found {len(offsets)} and {len(regions)}"
+        vcf_vars = collect_phasegroups(self.vars_hap0, self.vars_hap1, aln, reference, minimum_safe_distance=100)
 
-    seq_preds, probs, clspred = _call_safe(encoded_reads, model, n_output_toks, max_batch_size)
+        # covert variants to pysam vcf records
+        vcf_records = [
+            vcf.create_vcf_rec(var, vcf_template)
+            for var in sorted(vcf_vars, key=lambda x: x.pos)
+        ]
 
-    # convert clspred logits to probabilities
-    clspred = np.exp(clspred)
+        if not vcf_records:
+            return []
 
-    calledvars = []
-    for offset, (chrom, start, end), b in zip(offsets, regions, range(len(seq_preds))):
-        hap0_t, hap1_t = seq_preds[b, 0, :, :], seq_preds[b, 1, :, :]
-        hap0 = util.kmer_preds_to_seq(hap0_t, util.i2s)
-        hap1 = util.kmer_preds_to_seq(hap1_t, util.i2s)
-        probs0 = np.exp(util.expand_to_bases(probs[b, 0, :]))
-        probs1 = np.exp(util.expand_to_bases(probs[b, 1, :]))
-        tnpred = clspred[b].item() # This will need to change if clspred returns more than one value per region
+        for rec in vcf_records:
+            rec.info["RAW_QUAL"] = rec.qual
 
-        refseq = reference.fetch(chrom, offset, offset + len(hap0))
-        vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, hap0, chrom, offset, probs=probs0) if start <= v.pos <= end)
-        vars_hap1 = list(v for v in vcf.aln_to_vars(refseq, hap1, chrom, offset, probs=probs1) if start <= v.pos <= end)
-        for v in vars_hap0 + vars_hap1:
-            v.tnpred = tnpred
-        #print(f"Offset: {offset}\twindow {start}-{end} frame: {start % 4} hap0: {vars_hap0}\n       hap1: {vars_hap1}")
-        #calledvars.append((vars_hap0, vars_hap1))
-        calledvars.append((vars_hap0[0:5], vars_hap1[0:5]))
+        if classifier_model:
+            clfstart = time.time()
+            
+            clf_preds = buildclf.predict_records(vcf_records, classifier_model, bampath, refpath, threads=16)
+            for rec, pred in zip(vcf_records, clf_preds):
+                rec.qual = pred
 
-    return calledvars
+            clfend = time.time()
+            TOTAL_TIME_CLF += clfend - clfstart
+            logger.debug(f"Predicted variant quality for {len(vcf_records)} records in {(clfend - clfstart):6f} seconds ({(clfend - clfstart)/len(vcf_records) :6f} per record)")
 
-
-def add_ref_bases(encbases, reference, chrom, start, end, max_read_depth):
-    """
-    Add the reference sequence as read 0
-    """
-    refseq = reference.fetch(chrom, start, end)
-    ref_encoded = bam.string_to_tensor(refseq)
-    return torch.cat((ref_encoded.unsqueeze(1), encbases), dim=1)[:, 0:max_read_depth, :]
-
-
-def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_size=150, min_reads=5, batch_size=64, window_step=25):
-    """
-    Generate batches of tensors that encode read data from the given genomic region, along with position information. Each
-    batch of tensors generated should be suitable for input into a forward pass of the model - but the data will be on the
-    CPU.
-    Each item in the batch represents a pileup in a single 'window' into the given region of size 'window_size', and
-    subsequent elements are encoded from a sliding window that advances by 'window_step' after each item.
-    If start=100, window_size is 50, and window_step is 10, then the items will include data from regions:
-    100-150
-    110-160
-    120-170,
-    etc
-
-    The start positions for each item in the batch are returned in the 'batch_offsets' element, which is required
-    when variant calling to determine the genomic coordinates of the called variants.
-
-    If the full region size is small this will probably generate just a single batch, but if the region is very large
-    (or batch_size is small) this could generate multiple batches
-
-    :param window_size: Size of region in bp to generate for each item
-    :returns: Generator for tuples of (batch tensor, list of start positions)
-    """
-    window_start = int(start - 0.7 * window_size)  # We start with regions a bit upstream of the focal / target region
-    batch = []
-    batch_offsets = []
-    readwindow = bam.ReadWindow(aln, chrom, start - 150, end + window_size)
-    logger.debug(f"Encoding region {chrom}:{start}-{end}")
-    returned_count = 0
-    while window_start <= (end - 0.2 * window_size):
-        try:
-            #logger.debug(f"Getting reads from  readwindow: {window_start} - {window_start + window_size}")
-            enc_reads = readwindow.get_window(window_start, window_start + window_size, max_reads=max_read_depth)
-            encoded_with_ref = add_ref_bases(enc_reads, reference, chrom, window_start, window_start + window_size,
-                                             max_read_depth=max_read_depth)
-            batch.append(encoded_with_ref)
-            batch_offsets.append(window_start)
-            #logger.debug(f"Added item to batch from window_start {window_start}")
-        except bam.LowReadCountException:
-            logger.debug(
-                f"Bam window {chrom}:{window_start}-{window_start + window_size} "
-                f"had too few reads for variant calling (< {min_reads})"
-            )
-        window_start += window_step
-        if len(batch) >= batch_size:
-            encodedreads = torch.stack(batch, dim=0).cpu()
-            returned_count += 1
-            yield encodedreads, batch_offsets
-            batch = []
-            batch_offsets = []
-
-    # Last few
-    if batch:
-        encodedreads = torch.stack(batch, dim=0).cpu() # Keep encoded tensors on cpu for now
-        returned_count += 1
-        yield encodedreads, batch_offsets
-
-    if not returned_count:
-        logger.debug(f"Region {chrom}:{start}-{end} has only low coverage areas, not encoding data")
-
-
-def resolve_haplotypes(genos):
-    """
-    Rearrange variants across haplotypes with a heuristic algorithm to minimize the number of conflicting
-    predictions.
-    Genos is a list of two-tuples of Variant objects representing the outputs of calling from multiple overlapping windows
-    like this:
-    [ (hap0 variants from window 1, hap1 variants from window 1),
-      (hap0 variants from window 2, hap1 variants from window 2),
-      ...
-    ]
-    The goal is to rearrange variants across haplotypes to minimize conflicts
-    :returns : Two-tuple of dicts of variants, each representing one haplotype
-    """
-    # All unique variant keys, sorted by pos
-    allvars = sorted(list(v for g in genos for v in g[0]) + list(v for g in genos for v in g[1]), key=lambda v: v.pos)
-    allkeys = set()
-    varsnodups = []
-    for v in allvars:
-        if v.key not in allkeys:
-            allkeys.add(v.key)
-            varsnodups.append(v)
-
-    results = [[], []]
-
-    prev_het = None
-    prev_het_index = None
-
-    # Loop over every unique variant and decide which haplotype to put it on
-    for p in varsnodups:
-        homcount = 0
-        hetcount = 0
-        for g in genos:
-            a = p.key in [v.key for v in g[0]]
-            b = p.key in [v.key for v in g[1]]
-            if a and b:
-                homcount += 1
-            elif a or b:
-                hetcount += 1
-        if homcount > hetcount:
-            results[0].append(p)
-            results[1].append(p)
-        elif prev_het is None:
-            results[0].append(p) # No previous hets, so just add it to hap0
-            prev_het = p
-            prev_het_index = 0
-        else:
-            # There was a previous het variant, so figure out where this new one should go
-            # determine if p should be in cis or trans with prev_het
-            cis = 0
-            trans = 0
-            for g in genos:
-                g0keys = [v.key for v in g[0]]
-                g1keys = [v.key for v in g[1]]
-                if (p.key in g0keys and prev_het.key in g0keys) or (p.key in g1keys and prev_het.key in g1keys):
-                    cis += 1
-                elif (p.key in g0keys and prev_het.key in g1keys) or (p.key in g1keys and prev_het.key in g0keys):
-                    trans += 1
-            if trans >= cis: # If there's a tie, assume trans. This covers the case where cis==0 and trans==0, because trans is safer
-                results[1 - prev_het_index].append(p)
-                prev_het = p
-                prev_het_index = 1 - prev_het_index
+        merged = []
+        overlaps = [vcf_records[0]]
+        for rec in vcf_records[1:]:
+            if overlaps and util.records_overlap(overlaps[-1], rec):
+                overlaps.append(rec)
+            elif overlaps:
+                result = merge_overlaps(overlaps, min_qual=min_merge_qual)
+                merged.extend(result)
+                overlaps = [rec]
             else:
-                results[prev_het_index].append(p)
-                prev_het = p
-                prev_het_index = prev_het_index
+                overlaps = [rec]
 
-    # Build dictionaries with correct haplotypes...
-    allvars0 = dict()
-    allvars1 = dict()
-    for v in results[0]:
-        allvars0[v.key] = [t for t in allvars if t.key == v.key]
-    for v in results[1]:
-        allvars1[v.key] = [t for t in allvars if t.key == v.key]
-    return allvars0, allvars1
+        if overlaps:
+            merged.extend(merge_overlaps(overlaps, min_qual=min_merge_qual))
+        else:
+            merged.append(rec)
+
+        return merged
+
+    def _resolve_haplotypes(self):
+        """
+        Rearrange variants across haplotypes with a heuristic algorithm to minimize the number of conflicting
+        predictions.
+        Genos is a list of two-tuples of Variant objects representing the outputs of calling from multiple overlapping windows
+        like this:
+        [ (hap0 variants from window 1, hap1 variants from window 1),
+        (hap0 variants from window 2, hap1 variants from window 2),
+        ...
+        ]
+        These variants are essentially unphased, so we need to resolve them into two haplotypes, which
+        we represent as two dicts of variants, each containing the variants for a single haplotype
+        The variants are keyed by their genomic position, so we need to sort them by position
+
+        The goal is to rearrange variants across haplotypes to minimize conflicts
+        :returns : Two-tuple of dicts of variants, each representing one haplotype
+        """
+        genos = [(g.vars_hap0, g.vars_hap1) for g in self.genotype_predictions]
+        # All unique variant keys, sorted by pos
+        allvars = sorted(list(v for g in genos for v in g[0]) + list(v for g in genos for v in g[1]), key=lambda v: v.pos)
+        allkeys = set()
+        varsnodups = []
+        for v in allvars:
+            if v.key not in allkeys:
+                allkeys.add(v.key)
+                varsnodups.append(v)
+
+        results = [[], []]
+
+        prev_het = None
+        prev_het_index = None
+
+        # Loop over every unique variant and decide which haplotype to put it on
+        for p in varsnodups:
+            homcount = 0
+            hetcount = 0
+            for g in genos:
+                a = p.key in [v.key for v in g[0]]
+                b = p.key in [v.key for v in g[1]]
+                if a and b:
+                    homcount += 1
+                elif a or b:
+                    hetcount += 1
+            if homcount > hetcount:
+                results[0].append(p)
+                results[1].append(p)
+            elif prev_het is None:
+                results[0].append(p) # No previous hets, so just add it to hap0
+                prev_het = p
+                prev_het_index = 0
+            else:
+                # There was a previous het variant, so figure out where this new one should go
+                # determine if p should be in cis or trans with prev_het
+                cis = 0
+                trans = 0
+                for g in genos:
+                    g0keys = [v.key for v in g[0]]
+                    g1keys = [v.key for v in g[1]]
+                    if (p.key in g0keys and prev_het.key in g0keys) or (p.key in g1keys and prev_het.key in g1keys):
+                        cis += 1
+                    elif (p.key in g0keys and prev_het.key in g1keys) or (p.key in g1keys and prev_het.key in g0keys):
+                        trans += 1
+                if trans >= cis: # If there's a tie, assume trans. This covers the case where cis==0 and trans==0, because trans is safer
+                    results[1 - prev_het_index].append(p)
+                    prev_het = p
+                    prev_het_index = 1 - prev_het_index
+                else:
+                    results[prev_het_index].append(p)
+                    prev_het = p
+                    prev_het_index = prev_het_index
+
+        # Build dictionaries with correct haplotypes...
+        allvars0 = dict()
+        allvars1 = dict()   
+        for v in results[0]:
+            allvars0[v.key] = [t for t in allvars if t.key == v.key]
+        for v in results[1]:
+            allvars1[v.key] = [t for t in allvars if t.key == v.key]
+        return allvars0, allvars1
 
