@@ -1,7 +1,9 @@
 import numpy as np
 from dnaseq2seq.vcf import _cigtups, Cigar
-from typing import List
+from typing import List, Tuple
 from collections import Counter
+from skbio.alignment import StripedSmithWaterman
+
 
 class RefSeqMap:
     """ 
@@ -101,7 +103,15 @@ class MultiRefMap:
     def ref_bases(self):
         return self.refmaps[0].ref_bases()
     
+
 def merge_refmaps(maps: MultiRefMap):
+    """
+    Merge the aligned haplotypes represented by the MultiRefMap into a single sequence
+    This is accomplished by examining all bases / sequences that align to a each reference position and 
+    selecting the one with the highest sum of probabilities across all aligned sequences
+
+    : returns: the merged haplotype sequence as a string
+    """
     merged_haplotype = []
     for i in range(len(maps)):
         counts = Counter()
@@ -110,3 +120,39 @@ def merge_refmaps(maps: MultiRefMap):
             counts[b['target']] += b['prob']
         merged_haplotype.append(counts.most_common(1)[0][0])
     return "".join(merged_haplotype)
+
+def fmt(s):
+    if s is None:
+        return "N".ljust(5)
+    else:
+        return s.ljust(5)
+
+def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: str):
+    """
+    Merge the overlapping haplotypes into a single sequence
+    The algorithm here is to align each haplotype to the reference sequence and then merge the aligned haplotypes
+    """
+    ssw = StripedSmithWaterman(ref_seq,
+                               gap_open_penalty=3,
+                               gap_extend_penalty=1,
+                               match_score=1,
+                               mismatch_score=-1)
+    refmaps = []
+    for hapseq, probs in haplotypes:
+        aln = ssw(hapseq)
+        refmap = RefSeqMap(aln, probs)
+        refmaps.append(refmap)
+    
+
+    for i in range(len(refmaps[0])):
+        print(f"{i}\t{refmaps[0][i]['ref']}\t{refmaps[0][i]['target']}\t{refmaps[0][i]['prob'] :.4f}")
+
+    refmaps = MultiRefMap(refmaps)
+    refbase = refmaps.ref_bases()
+
+    for i in range(len(refmaps)):
+        d = " ".join(fmt(r['target']) for r in refmaps[i])
+        print(f"{refbase[i]}\t{d}")
+
+    merged = merge_refmaps(refmaps)
+    return merged

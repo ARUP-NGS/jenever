@@ -7,6 +7,7 @@ import string
 import random
 import traceback
 from collections import defaultdict
+from Levenshtein import distance
 
 from functools import partial
 from pathlib import Path
@@ -25,6 +26,7 @@ from dnaseq2seq import buildclf
 from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
+from dnaseq2seq import hapmerger
 
 logger = logging.getLogger(__name__)
 
@@ -564,6 +566,9 @@ def call_multi_paths(datas, model, refpath, bampath, classifier_model, vcf_templ
     
     for window_result in window_results:
         window_result.print_genotype_predictions()
+
+        window_result.merge_haplotypes(refpath, bampath)
+
         records = window_result.to_records(bampath, refpath, classifier_model, vcf_template)
         var_records.extend(records)
 
@@ -963,7 +968,6 @@ def collect_phasegroups(vars_hap0, vars_hap1, aln, reference, minimum_safe_dista
     return all_vcf_vars
 
 
-
 class GenotypePrediction:
     """ Two haplotype predictions for a single window,  """
 
@@ -977,7 +981,29 @@ class GenotypePrediction:
         self.probs1 = probs1
         self.vars_hap0 = None
         self.vars_hap1 = None
-
+        
+    @property
+    def end(self):
+        return self.offset + len(self.hap0)
+    
+    def __len__(self):
+        return len(self.hap0)
+    
+    def swap(self):
+        self.hap0, self.hap1 = self.hap1, self.hap0
+        self.probs0, self.probs1 = self.probs1, self.probs0
+        self.vars_hap0, self.vars_hap1 = self.vars_hap1, self.vars_hap0
+    
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            start = idx.start - self.offset if idx.start is not None else 0
+            stop = idx.stop - self.offset if idx.stop is not None else len(self)
+            step = idx.step
+            assert (step is None)
+            return self.hap0[start:stop], self.hap1[start:stop]
+        else:
+            return self.hap0[idx - self.offset], self.hap1[idx - self.offset]
+        
     def aln_vars(self, reference: pysam.FastaFile):
         """ Align the haplotypes to the reference genome to create Variant objects """
         refseq = reference.fetch(self.region[0], self.region[1], self.region[2])
@@ -990,6 +1016,20 @@ class GenotypePrediction:
         self.vars_hap0 = vars_hap0
         self.vars_hap1 = vars_hap1
         
+
+def calc_cis_trans_distance(g0: GenotypePrediction, g1: GenotypePrediction):
+    start = max(g0.offset, g1.offset)
+    end = min(g0.end, g1.end)
+    assert end > start
+    g0haps = g0[start:end]
+    g1haps = g1[start:end]
+    print(f"Comparing from {start} to {end}")
+    print(g0haps)
+    print(g1haps)
+    cis_distance = distance(g0haps[0], g1haps[0]) + distance(g0haps[1], g1haps[1])
+    trans_distance = distance(g0haps[0], g1haps[1]) + distance(g0haps[1], g1haps[0])
+    return cis_distance, trans_distance
+
 
 class WindowResult:
     """ Results for a single window """
@@ -1004,7 +1044,42 @@ class WindowResult:
             print(f"Genotype {i}: offset {g.offset}")
             print(g.hap0 + "\t" + ", ".join(str(v) for v in g.vars_hap0))
             print(g.hap1 + "\t" + ", ".join(str(v) for v in g.vars_hap1))
-    
+
+    def merge_haplotypes(self, refpath: str, bampath: str):
+        """
+        Merge the haplotypes into a single string
+        """
+        reference = pysam.FastaFile(refpath)
+        aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
+
+        # The 'region' field in GenotypePrediction and WindowResult is the 'region of interest'
+        # in which we suspect the variants are, but the individual calling windows start upstream of that 
+        # and may extend beyond it. So the reference sequence needs to be fetched from near the start of
+        # the first window, and the end of the last window
+        start = min(g.offset for g in self.genotype_predictions)
+        end = max(g.end for g in self.genotype_predictions)
+        refseq = reference.fetch(self.region[0], start, end)
+
+        # First, figure out what the haplotype phasing is
+        for a,b in zip(self.genotype_predictions, self.genotype_predictions[1:]):
+            cis_distance, trans_distance = calc_cis_trans_distance(a, b)
+            if trans_distance < cis_distance:
+                b.swap()
+        # Then, merge the haplotypes
+        h0_haps = [(g.hap0, g.probs0) for g in self.genotype_predictions]
+        h1_haps = [(g.hap1, g.probs1) for g in self.genotype_predictions]
+        h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq)
+        h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq)
+
+        # Then, align the merged haplotype to the reference genome and pluck out variants from there
+        hap0_vars = vcf.aln_to_vars(refseq, h0_merged, self.region[0], start)
+        hap1_vars = vcf.aln_to_vars(refseq, h1_merged, self.region[0], start)
+
+        vcf_vars = collect_phasegroups(hap0_vars, hap1_vars, aln, reference, minimum_safe_distance=100)
+
+        return vcf_vars
+        
+
     def to_records(self, bampath, refpath, classifier_model, vcf_template):
         """
         Convert variant haplotype objects to variant records
