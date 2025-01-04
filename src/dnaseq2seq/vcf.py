@@ -29,6 +29,12 @@ class Variant:
     aln_score: int = None
     tnpred: float = None
 
+    def __str__(self):
+        a = self.alt
+        if len(a) > 20:
+            a = self.alt[:20] + "..."
+        return f"Var {self.chrom}:{self.pos} {self.ref}->{a}"
+
     def __eq__(self, other):
         return self.chrom == other.chrom and self.ref == other.ref and self.alt == other.alt and self.pos == other.pos
 
@@ -386,7 +392,7 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
         vcfvars_hap0[var].genotype = (1, 1)
         vcfvars_hap0[var].het = False
         vcfvars_hap0[var].window_offset = sorted(set(vcfvars_hap0[var].window_offset + vcfvars_hap1[var].window_offset))
-        vcfvars_hap0[var].tnpred = np.mean(x for x in vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred)
+        vcfvars_hap0[var].tnpred =  [0] #np.mean(x for x in vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred)
         # then remove from hap1 vars
         vcfvars_hap1.pop(var)
 
@@ -544,7 +550,7 @@ def create_vcf_rec(var, vcf_file):
     r.info['STEP_COUNT'] = var.step_count
     r.info['WIN_OFFSETS'] = [int(x) for x in var.window_offset]
     r.info['VAR_INDEX'] = [int(x) for x in var.var_index]
-    r.info['TNPRED'] = [float(f"{x :.4f}") for x in var.tnpred]
+    r.info['TNPRED'] = 0 #[float(f"{x :.4f}") for x in var.tnpred]
     if var.duplicate:
         r.info['DUPLICATE'] = ()
     return r

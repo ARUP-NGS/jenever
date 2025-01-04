@@ -494,7 +494,7 @@ def generate_tensors(region_queue: mp.Queue, output_queue: mp.Queue, bampath, re
     """
     min_reads = 5 # Abort if there are fewer than this many reads
     batch_size = 64 # Tensors hold this many regions at max, but since we're encoding a single region most tensors will have 4-8 individual windows
-    window_step = 25
+    window_step = 20
     torch.set_num_threads(2)  # Must be here for it to work for this process
 
     encoded_region_count = 0
@@ -565,11 +565,11 @@ def call_multi_paths(datas, model, refpath, bampath, classifier_model, vcf_templ
     window_results = call_and_merge(allencoded, batch_start_pos, batch_regions, model, reference, max_batch_size)
     
     for window_result in window_results:
-        window_result.print_genotype_predictions()
+        # window_result.print_genotype_predictions()
 
-        window_result.merge_haplotypes(refpath, bampath)
+        records = window_result.merge_haplotypes(refpath, bampath, vcf_template)
 
-        records = window_result.to_records(bampath, refpath, classifier_model, vcf_template)
+        #records = window_result.to_records(bampath, refpath, classifier_model, vcf_template)
         var_records.extend(records)
 
     call_elapsed = datetime.datetime.now() - call_start
@@ -1003,7 +1003,10 @@ class GenotypePrediction:
             return self.hap0[start:stop], self.hap1[start:stop]
         else:
             return self.hap0[idx - self.offset], self.hap1[idx - self.offset]
-        
+    
+    def __str__(self):
+        return f"GenotypePrediction(region={self.region} offset={self.offset} homozygous={self.hap0 == self.hap1} vars0={self.vars_hap0}, vars1={self.vars_hap1})"
+    
     def aln_vars(self, reference: pysam.FastaFile):
         """ Align the haplotypes to the reference genome to create Variant objects """
         refseq = reference.fetch(self.region[0], self.region[1], self.region[2])
@@ -1023,9 +1026,6 @@ def calc_cis_trans_distance(g0: GenotypePrediction, g1: GenotypePrediction):
     assert end > start
     g0haps = g0[start:end]
     g1haps = g1[start:end]
-    print(f"Comparing from {start} to {end}")
-    print(g0haps)
-    print(g1haps)
     cis_distance = distance(g0haps[0], g1haps[0]) + distance(g0haps[1], g1haps[1])
     trans_distance = distance(g0haps[0], g1haps[1]) + distance(g0haps[1], g1haps[0])
     return cis_distance, trans_distance
@@ -1041,11 +1041,11 @@ class WindowResult:
     def print_genotype_predictions(self):
         print(f"Region: {self.region}")
         for i, g in enumerate(self.genotype_predictions):
-            print(f"Genotype {i}: offset {g.offset}")
-            print(g.hap0 + "\t" + ", ".join(str(v) for v in g.vars_hap0))
-            print(g.hap1 + "\t" + ", ".join(str(v) for v in g.vars_hap1))
+            print(f"Genotype {i}: {g.offset} - {g.end} TN pred: {g.tn_prob :.5f}")
+            print(g.hap0[0:20] + "..." + "\t" + ", ".join(str(v) for v in g.vars_hap0))
+            print(g.hap1[0:20] + "..." + "\t" + ", ".join(str(v) for v in g.vars_hap1))
 
-    def merge_haplotypes(self, refpath: str, bampath: str):
+    def merge_haplotypes(self, refpath: str, bampath: str, vcf_template: pysam.VariantFile):
         """
         Merge the haplotypes into a single string
         """
@@ -1068,16 +1068,25 @@ class WindowResult:
         # Then, merge the haplotypes
         h0_haps = [(g.hap0, g.probs0) for g in self.genotype_predictions]
         h1_haps = [(g.hap1, g.probs1) for g in self.genotype_predictions]
-        h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq)
-        h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq)
+        h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
+        h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
 
         # Then, align the merged haplotype to the reference genome and pluck out variants from there
         hap0_vars = vcf.aln_to_vars(refseq, h0_merged, self.region[0], start)
         hap1_vars = vcf.aln_to_vars(refseq, h1_merged, self.region[0], start)
 
-        vcf_vars = collect_phasegroups(hap0_vars, hap1_vars, aln, reference, minimum_safe_distance=100)
+        hap0dict = {v.key: [v] for v in hap0_vars}
+        hap1dict = {v.key: [v] for v in hap1_vars}
+        # collect_phasegroups expects dicts of variants, not lists
+        vcf_vars = collect_phasegroups(hap0dict, hap1dict, aln, reference, minimum_safe_distance=100)
+        vcf_vars = [v for v in vcf_vars if v.pos >= self.region[1] and v.pos <= self.region[2]]
 
-        return vcf_vars
+        vcf_records = [
+            vcf.create_vcf_rec(var, vcf_template)
+            for var in sorted(vcf_vars, key=lambda x: x.pos)
+        ]
+
+        return vcf_records
         
 
     def to_records(self, bampath, refpath, classifier_model, vcf_template):

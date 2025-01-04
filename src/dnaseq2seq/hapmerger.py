@@ -23,6 +23,8 @@ class RefSeqMap:
         else:
             self.probs = np.ones(len(self.aln.target_sequence))
         self.cigtups = list(_cigtups(self.aln.cigar))
+        if self.aln.target_begin > 0:
+            self.cigtups.insert(0, Cigar(op="D", len=self.aln.target_begin))
         if self.aln.query_begin > 0:
             self.cigtups.insert(0, Cigar(op="S", len=self.aln.query_begin))
         if len(self.aln.query_sequence) > self.aln.query_end:
@@ -61,7 +63,10 @@ class RefSeqMap:
 
             elif cig.op == "D":
                 # refmap.append((self.aln.query_sequence[q_offset], self.aln.target_sequence[t_offset:t_offset+cig.len]))
-                refmap[-1]['target'] = refmap[-1]['target'] + self.aln.target_sequence[t_offset:t_offset+cig.len]
+                if refmap[-1]['target'] is not None:
+                    refmap[-1]['target'] = refmap[-1]['target'] + self.aln.target_sequence[t_offset:t_offset+cig.len]
+                else:
+                    refmap[-1]['target'] = self.aln.target_sequence[t_offset:t_offset+cig.len]
                 # print(f"q offset: {q_offset} rm: {refmap[-1]}")
                 t_offset += cig.len
 
@@ -119,7 +124,7 @@ def merge_refmaps(maps: MultiRefMap):
         for b in bases:
             counts[b['target']] += b['prob']
         merged_haplotype.append(counts.most_common(1)[0][0])
-    return "".join(merged_haplotype)
+    return "".join(filter(lambda x: x is not None, merged_haplotype))
 
 def fmt(s):
     if s is None:
@@ -127,14 +132,14 @@ def fmt(s):
     else:
         return s.ljust(5)
 
-def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: str):
+def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: str, pos_offset: int = 0):
     """
     Merge the overlapping haplotypes into a single sequence
     The algorithm here is to align each haplotype to the reference sequence and then merge the aligned haplotypes
     """
     ssw = StripedSmithWaterman(ref_seq,
-                               gap_open_penalty=3,
-                               gap_extend_penalty=1,
+                               gap_open_penalty=5,
+                               gap_extend_penalty=0.1,
                                match_score=1,
                                mismatch_score=-1)
     refmaps = []
@@ -144,15 +149,15 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: 
         refmaps.append(refmap)
     
 
-    for i in range(len(refmaps[0])):
-        print(f"{i}\t{refmaps[0][i]['ref']}\t{refmaps[0][i]['target']}\t{refmaps[0][i]['prob'] :.4f}")
+    # for i in range(len(refmaps[0])):
+    #     print(f"{i}\t{refmaps[0][i]['ref']}\t{refmaps[0][i]['target']}\t{refmaps[0][i]['prob'] :.4f}")
 
     refmaps = MultiRefMap(refmaps)
     refbase = refmaps.ref_bases()
 
-    for i in range(len(refmaps)):
-        d = " ".join(fmt(r['target']) for r in refmaps[i])
-        print(f"{refbase[i]}\t{d}")
+    # for i in range(len(refmaps)):
+    #     d = " ".join(fmt(r['target']) for r in refmaps[i])
+    #     print(f"{i :5}\t{refbase[i]}\t{d}")
 
     merged = merge_refmaps(refmaps)
     return merged
