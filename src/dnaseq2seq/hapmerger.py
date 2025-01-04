@@ -63,10 +63,18 @@ class RefSeqMap:
 
             elif cig.op == "D":
                 # refmap.append((self.aln.query_sequence[q_offset], self.aln.target_sequence[t_offset:t_offset+cig.len]))
-                if refmap[-1]['target'] is not None:
+                if len(refmap) == 0:
+                    refmap.append({
+                        "ref": self.aln.query_sequence[q_offset],
+                        "target": self.aln.target_sequence[t_offset:t_offset+cig.len],
+                        "prob": np.mean(self.probs[t_offset:t_offset+cig.len]),
+                        })
+                elif refmap[-1]['target'] is not None:
                     refmap[-1]['target'] = refmap[-1]['target'] + self.aln.target_sequence[t_offset:t_offset+cig.len]
+                    refmap[-1]['prob'] = np.mean(self.probs[t_offset:t_offset+cig.len])
                 else:
                     refmap[-1]['target'] = self.aln.target_sequence[t_offset:t_offset+cig.len]
+                    refmap[-1]['prob'] = np.mean(self.probs[t_offset:t_offset+cig.len])
                 # print(f"q offset: {q_offset} rm: {refmap[-1]}")
                 t_offset += cig.len
 
