@@ -185,14 +185,12 @@ class VarTransformer(nn.Module):
 
 
     def encode(self, src):
-        logger.info(f"input src shape: {src.shape}")
         # Add CLS token to the beginning of the sequence, the dimensions of src are (batch_size, seq_len, read_depth, feature_count)
         src = torch.cat((self.cls_token.unsqueeze(0).repeat(src.shape[0], 1, src.shape[2], 1), src), dim=1)
 
         src = F.gelu(self.fc1(src)) # Operates on each "feature" (10 feature encoded base)
         src = self.pos_encoder(src)  # For 2D encoding we have to do this before flattening, right?
         src = src.flatten(start_dim=2)
-        logger.info(f"src shape: {src.shape}")
         src = F.gelu(self.fc2(src)) # Operates on an entire alignment column
         src = self.emb_dropout(self.emb_layernorm(src))
         mem = self.encoder(src)
