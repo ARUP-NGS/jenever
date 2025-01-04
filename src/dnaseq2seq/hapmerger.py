@@ -105,7 +105,8 @@ class MultiRefMap:
     def __init__(self, refmaps: List[RefSeqMap]):
         self.refmaps = refmaps
         for rm in refmaps:
-            assert rm.ref_bases() == refmaps[0].ref_bases(), f"All refmaps must share the same reference bases (got \n{rm.ref_bases()}\n{refmaps[0].ref_bases()})"
+            if rm.ref_bases() != refmaps[0].ref_bases():
+                raise Exception(f"Refmaps do not have idential ref bases")
 
     def __getitem__(self, idx):
         return [rm[idx] for rm in self.refmaps]

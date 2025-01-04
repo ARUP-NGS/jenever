@@ -1068,8 +1068,20 @@ class WindowResult:
         # Then, merge the haplotypes
         h0_haps = [(g.hap0, g.probs0) for g in self.genotype_predictions]
         h1_haps = [(g.hap1, g.probs1) for g in self.genotype_predictions]
-        h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
-        h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
+        try:
+            h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
+        except Exception as ex:
+            logger.error(f"Exception merging haplotypes for hap0")
+            logger.error("window is: {self}")
+            raise ex
+
+        try:
+            h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
+        except Exception as ex:
+            logger.error(f"Exception merging haplotypes for hap1")
+            logger.error("window is: {self}")
+            raise ex
+
 
         # Then, align the merged haplotype to the reference genome and pluck out variants from there
         hap0_vars = vcf.aln_to_vars(refseq, h0_merged, self.region[0], start)
