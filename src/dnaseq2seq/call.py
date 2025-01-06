@@ -1051,7 +1051,8 @@ class WindowResult:
         """
         reference = pysam.FastaFile(refpath)
         aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
-
+        logger.info(f"Merging haplotypes for {self.region}")
+        
         # The 'region' field in GenotypePrediction and WindowResult is the 'region of interest'
         # in which we suspect the variants are, but the individual calling windows start upstream of that 
         # and may extend beyond it. So the reference sequence needs to be fetched from near the start of
@@ -1071,14 +1072,14 @@ class WindowResult:
         try:
             h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
         except Exception as ex:
-            logger.error(f"Exception merging haplotypes for hap0")
+            logger.error(f"Exception merging haplotypes for hap0: {ex}")
             logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
         try:
             h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
         except Exception as ex:
-            logger.error(f"Exception merging haplotypes for hap1")
+            logger.error(f"Exception merging haplotypes for hap1: {ex}")
             logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
