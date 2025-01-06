@@ -15,20 +15,24 @@ class RefSeqMap:
     """
     def __init__(self, aln, probs=None):
         self.aln = aln
-        # print(f"Query: {self.aln.query_sequence}")
-        # print(f"Target: {self.aln.target_sequence}")
         if probs is not None:
             assert len(probs) == len(self.aln.target_sequence)
             self.probs = probs
         else:
             self.probs = np.ones(len(self.aln.target_sequence))
         self.cigtups = list(_cigtups(self.aln.cigar))
+        
         if self.aln.target_begin > 0:
-            self.cigtups.insert(0, Cigar(op="D", len=self.aln.target_begin))
+            self.cigtups[0].len -= 1
+            if len(self.cigtups) == 0:
+                self.cigtups.pop(0)
+            self.cigtups.insert(0, Cigar(op="S", len=1))
+            self.cigtups.insert(1, Cigar(op="D", len=self.aln.target_begin))
+            
         if self.aln.query_begin > 0:
             self.cigtups.insert(0, Cigar(op="S", len=self.aln.query_begin))
+        
         if len(self.aln.query_sequence) > self.aln.query_end:
-            # print(f"Query sequence len: {len(self.aln.query_sequence)}, query end: {self.aln.query_end}")
             self.cigtups.append(Cigar(op="S", len=len(self.aln.query_sequence) - self.aln.query_end - 1))
 
         # print(self.cigtups)
@@ -62,14 +66,7 @@ class RefSeqMap:
                     q_offset += 1
 
             elif cig.op == "D":
-                # refmap.append((self.aln.query_sequence[q_offset], self.aln.target_sequence[t_offset:t_offset+cig.len]))
-                if len(refmap) == 0:
-                    refmap.append({
-                        "ref": self.aln.query_sequence[q_offset],
-                        "target": self.aln.target_sequence[t_offset:t_offset+cig.len],
-                        "prob": np.mean(self.probs[t_offset:t_offset+cig.len]),
-                        })
-                elif refmap[-1]['target'] is not None:
+                if refmap[-1]['target'] is not None:
                     refmap[-1]['target'] = refmap[-1]['target'] + self.aln.target_sequence[t_offset:t_offset+cig.len]
                     refmap[-1]['prob'] = np.mean(self.probs[t_offset:t_offset+cig.len])
                 else:
@@ -106,7 +103,14 @@ class MultiRefMap:
         self.refmaps = refmaps
         for rm in refmaps:
             if rm.ref_bases() != refmaps[0].ref_bases():
-                raise Exception(f"Refmaps do not have idential ref bases")
+                m = []
+                for i, (a,b) in enumerate(zip(rm.ref_bases(), refmaps[0].ref_bases())):
+                    if a != b:
+                        m.append(f"{i}: {a} != {b}")
+                    else:
+                        m.append(f"{i}: {a} == {b}")
+                print("\n".join(m))
+                raise Exception(f"Refmaps do not have idential ref bases at positions {m}")
 
     def __getitem__(self, idx):
         return [rm[idx] for rm in self.refmaps]
@@ -152,10 +156,13 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: 
                                match_score=1,
                                mismatch_score=-1)
     refmaps = []
-    for hapseq, probs in haplotypes:
+    for i, (hapseq, probs) in enumerate(haplotypes):
         aln = ssw(hapseq)
         refmap = RefSeqMap(aln, probs)
         refmaps.append(refmap)
+        # if i > 1:
+        #     if refmaps[-2].ref_bases() != refmaps[-1].ref_bases():
+        #         raise Exception(f"Refmaps {i} and {i-1}do not have idential ref bases")
     
 
     # for i in range(len(refmaps[0])):
