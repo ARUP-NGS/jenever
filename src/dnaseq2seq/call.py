@@ -1072,14 +1072,14 @@ class WindowResult:
             h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap0")
-            logger.error("window is: {self}")
+            logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
         try:
             h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap1")
-            logger.error("window is: {self}")
+            logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
 
