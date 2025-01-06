@@ -59,8 +59,8 @@ class RefSeqMap:
                 for _ in range(cig.len):
                     refmap.append({
                         "ref": self.aln.query_sequence[q_offset],
-                        "target": "-",
-                        "prob": -1.0,
+                        "target": "",
+                        "prob": 0.95, # No idea what to put here!
                         })
                     # print(f"q offset: {q_offset} rm: {refmap[-1]}")
                     q_offset += 1
@@ -160,20 +160,13 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: 
         aln = ssw(hapseq)
         refmap = RefSeqMap(aln, probs)
         refmaps.append(refmap)
-        # if i > 1:
-        #     if refmaps[-2].ref_bases() != refmaps[-1].ref_bases():
-        #         raise Exception(f"Refmaps {i} and {i-1}do not have idential ref bases")
-    
-
-    # for i in range(len(refmaps[0])):
-    #     print(f"{i}\t{refmaps[0][i]['ref']}\t{refmaps[0][i]['target']}\t{refmaps[0][i]['prob'] :.4f}")
 
     refmaps = MultiRefMap(refmaps)
     refbase = refmaps.ref_bases()
 
-    # for i in range(len(refmaps)):
-    #     d = " ".join(fmt(r['target']) for r in refmaps[i])
-    #     print(f"{i :5}\t{refbase[i]}\t{d}")
+    for i in range(len(refmaps)):
+        d = " ".join(fmt(r['target']) for r in refmaps[i])
+        print(f"{i}\t{i+pos_offset :5}\t{refbase[i]}\t{d}")
 
     merged = merge_refmaps(refmaps)
     return merged
