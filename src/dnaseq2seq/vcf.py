@@ -377,9 +377,10 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
         vcfvars_hap0[var].genotype = (1, 1)
         vcfvars_hap0[var].het = False
 
-        vcfvars_hap1.pop(var)
         vcfvars_hap0[var].total_windows = vcfvars_hap0[var].total_windows + vcfvars_hap1[var].total_windows
         vcfvars_hap0[var].total_calls = vcfvars_hap0[var].total_calls + vcfvars_hap1[var].total_calls
+        
+        vcfvars_hap1.pop(var)
 
     # combine haplotypes
     assert len(set(vcfvars_hap0) & set(vcfvars_hap1)) == 0, (
@@ -472,28 +473,6 @@ def create_vcf_header(sample_name="sample", lowcov=30, cmdline=None):
                                    ('Description', 'Total number of windows overlapping variant')])
     vcfh.add_meta('INFO', items=[('ID', "TOTAL_CALLS"), ('Number', "."), ('Type', 'Integer'),
                                    ('Description', 'Total number of windows in which variant was called')])
-    # vcfh.add_meta('INFO', items=[('ID', "WIN_VAR_COUNT"), ('Number', "."), ('Type', 'Integer'),
-    #                              ('Description', 'Total variants called in same window(s)')])
-    # vcfh.add_meta('INFO', items=[('ID', "WIN_CIS_COUNT"), ('Number', "."), ('Type', 'Integer'),
-    #                              ('Description', 'Total cis variants called in same window(s)')])
-    # vcfh.add_meta('INFO', items=[('ID', "WIN_TRANS_COUNT"), ('Number', "."), ('Type', 'Integer'),
-    #                              ('Description', 'Total cis variants called in same window(s)')])
-    # vcfh.add_meta('INFO', items=[('ID', "QUALS"), ('Number', "."), ('Type', 'Float'),
-    #                              ('Description', 'QUAL value(s) for calls in window(s)')])
-    # vcfh.add_meta('INFO', items=[('ID', "CALL_COUNT"), ('Number', "."), ('Type', 'Integer'),
-    #                              ('Description', 'Number of model haplotype calls of this var in multi-step detection')])
-    # vcfh.add_meta('INFO', items=[('ID', "STEP_COUNT"), ('Number', "."), ('Type', 'Integer'),
-    #                              ('Description', 'Number of overlapping steps where var detected in multi-step detection')])
-    # vcfh.add_meta('INFO', items=[('ID', "DUPLICATE"), ('Number', 1), ('Type', 'String'),
-    #                              ('Description', 'Duplicate of call made in previous window')])
-    # vcfh.add_meta('INFO', items=[('ID', "WIN_OFFSETS"), ('Number', "."), ('Type', 'Integer'),
-    #                              ('Description', 'Position of call within calling window')])
-    # vcfh.add_meta('INFO', items=[('ID', "VAR_INDEX"), ('Number', "."), ('Type', 'Integer'),
-    #                              ('Description', 'Order of call in window')])
-    # vcfh.add_meta('INFO', items=[('ID', "RAW_QUAL"), ('Number', 1), ('Type', 'Float'),
-    #                              ('Description', 'Original quality if classifier used to update QUAL field')])
-    # vcfh.add_meta('INFO', items=[('ID', "TNPRED"), ('Number', "."), ('Type', 'Float'),
-    #                              ('Description', 'Predicted probability of being a true negative')])
     # write to new vcf file object
     return vcfh
 
@@ -530,20 +509,10 @@ def create_vcf_rec(var, vcf_file):
     r.samples['sample'].phased = var.phased  # note: need to set phased after setting genotype
     r.samples['sample']['DP'] = var.depth
     r.samples['sample']['PS'] = var.phase_set
+    
     # Set INFO values
     r.info['TOTAL_WINDOWS'] = var.total_windows
     r.info['TOTAL_CALLS'] = var.total_calls
-    # r.info['WIN_VAR_COUNT'] = var.window_var_count
-    # r.info['WIN_CIS_COUNT'] = var.window_cis_vars
-    # r.info['WIN_TRANS_COUNT'] = var.window_trans_vars
-    # r.info['QUALS'] = [float(x) for x in var.quals]
-    # r.info['CALL_COUNT'] = var.call_count
-    # r.info['STEP_COUNT'] = var.step_count
-    # r.info['WIN_OFFSETS'] = [int(x) for x in var.window_offset]
-    # r.info['VAR_INDEX'] = [int(x) for x in var.var_index]
-    # r.info['TNPRED'] = 0 #[float(f"{x :.4f}") for x in var.tnpred]
-    # if var.duplicate:
-    #     r.info['DUPLICATE'] = ()
     return r
 
 
