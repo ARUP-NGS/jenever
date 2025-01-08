@@ -1051,7 +1051,6 @@ class WindowResult:
         """
         reference = pysam.FastaFile(refpath)
         aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
-        logger.info(f"Merging haplotypes for {self.region}")
         
         # The 'region' field in GenotypePrediction and WindowResult is the 'region of interest'
         # in which we suspect the variants are, but the individual calling windows start upstream of that 

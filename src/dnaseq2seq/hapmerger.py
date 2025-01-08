@@ -164,9 +164,9 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: 
     refmaps = MultiRefMap(refmaps)
     refbase = refmaps.ref_bases()
 
-    for i in range(len(refmaps)):
-        d = " ".join(fmt(r['target']) for r in refmaps[i])
-        print(f"{i}\t{i+pos_offset :5}\t{refbase[i]}\t{d}")
+    #for i in range(len(refmaps)):
+    #    d = " ".join(fmt(r['target']) for r in refmaps[i])
+    #    print(f"{i}\t{i+pos_offset :5}\t{refbase[i]}\t{d}")
 
     merged = merge_refmaps(refmaps)
     return merged
