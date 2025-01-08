@@ -60,7 +60,7 @@ class RefSeqMap:
                     refmap.append({
                         "ref": self.aln.query_sequence[q_offset],
                         "target": "",
-                        "prob": 0.95, # No idea what to put here!
+                        "prob": 1.0, # No idea what to put here - but if you want the deletion bases to be included in the merged haplotype then this should be ~1.0
                         })
                     # print(f"q offset: {q_offset} rm: {refmap[-1]}")
                     q_offset += 1
@@ -80,7 +80,7 @@ class RefSeqMap:
                     refmap.append({
                         "ref": self.aln.query_sequence[q_offset],
                         "target": None,
-                        "prob": -1.0,
+                        "prob": 0.0,
                         })
                     # print(f"q offset: {q_offset} rm: {refmap[-1]}")
                     q_offset += 1
@@ -128,22 +128,52 @@ def merge_refmaps(maps: MultiRefMap):
     This is accomplished by examining all bases / sequences that align to a each reference position and 
     selecting the one with the highest sum of probabilities across all aligned sequences
 
+    Note that this has oddly different behavior for SNPs and insertions than it does for deletions.
+    For SNVs and insertions, the entire modified unit is represneted as a single entry, but for
+    deletions each deleted base is represented as a separate entry.
+    This means that when iterating over each aligned sequence,SNVs and insertions are accepted or rejected basically by
+    voting across all the aligned sequences, but for deletions each base is voted on individually.
+
     : returns: the merged haplotype sequence as a string
     """
     merged_haplotype = []
+    meta = []
     for i in range(len(maps)):
         counts = Counter()
         bases = maps[i]
         for b in bases:
             counts[b['target']] += b['prob']
-        merged_haplotype.append(counts.most_common(1)[0][0])
-    return "".join(filter(lambda x: x is not None, merged_haplotype))
+        
+        most_common_base, most_common_prob_sum = counts.most_common(1)[0]
+        merged_haplotype.append(most_common_base)
+        meta.append({
+            "overlapping_windows": len([b for b in bases if b['target'] is not None]),
+            "total_bases": len(bases),
+            "total_prob": sum(b['prob'] for b in bases if b['target'] is not None),
+            "supporting_prob_sum": most_common_prob_sum,
+        })
+    
+    merged_hap_seq = []
+    merged_meta = []
+    for hap, meta in zip(merged_haplotype, meta):
+        if hap is not None and hap != "":
+            merged_hap_seq.append(hap)
+            for _ in range(len(hap)): # We require a meta entry for each base in the merged haplotype, and insertions have more than one base
+                merged_meta.append(meta)
+
+    final_hap_seq = "".join(merged_hap_seq)
+    if len(final_hap_seq) != len(merged_meta):
+        print("aargh")
+    assert len(final_hap_seq) == len(merged_meta), f"Final haplotype sequence length {len(final_hap_seq)} does not match meta length {len(merged_meta)}"
+    return final_hap_seq, merged_meta
+
 
 def fmt(s):
     if s is None:
         return "N".ljust(5)
     else:
         return s.ljust(5)
+
 
 def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: str, pos_offset: int = 0):
     """
@@ -162,11 +192,11 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: 
         refmaps.append(refmap)
 
     refmaps = MultiRefMap(refmaps)
-    refbase = refmaps.ref_bases()
 
-    for i in range(len(refmaps)):
-        d = " ".join(fmt(r['target']) for r in refmaps[i])
-        print(f"{i}\t{i+pos_offset :5}\t{refbase[i]}\t{d}")
+    # refbase = refmaps.ref_bases()
+    # for i in range(len(refmaps)):
+    #     d = " ".join(fmt(r['target']) for r in refmaps[i])
+    #     print(f"{i}\t{i+pos_offset :5}\t{refbase[i]}\t{d}")
 
-    merged = merge_refmaps(refmaps)
-    return merged
+    merged, merge_info = merge_refmaps(refmaps)
+    return merged, merge_info

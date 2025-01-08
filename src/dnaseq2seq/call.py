@@ -1052,7 +1052,7 @@ class WindowResult:
         reference = pysam.FastaFile(refpath)
         aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
         logger.info(f"Merging haplotypes for {self.region}")
-        
+
         # The 'region' field in GenotypePrediction and WindowResult is the 'region of interest'
         # in which we suspect the variants are, but the individual calling windows start upstream of that 
         # and may extend beyond it. So the reference sequence needs to be fetched from near the start of
@@ -1070,14 +1070,14 @@ class WindowResult:
         h0_haps = [(g.hap0, g.probs0) for g in self.genotype_predictions]
         h1_haps = [(g.hap1, g.probs1) for g in self.genotype_predictions]
         try:
-            h0_merged = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
+            h0_merged, h0_merge_info = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap0: {ex}")
             logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
         try:
-            h1_merged = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
+            h1_merged, h1_merge_info = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap1: {ex}")
             logger.error(f"window is: {self.print_genotype_predictions()}")
@@ -1085,14 +1085,14 @@ class WindowResult:
 
 
         # Then, align the merged haplotype to the reference genome and pluck out variants from there
-        hap0_vars = vcf.aln_to_vars(refseq, h0_merged, self.region[0], start)
-        hap1_vars = vcf.aln_to_vars(refseq, h1_merged, self.region[0], start)
+        hap0_vars = vcf.aln_to_vars(refseq, h0_merged, self.region[0], start, h0_merge_info)
+        hap1_vars = vcf.aln_to_vars(refseq, h1_merged, self.region[0], start, h1_merge_info)
 
         hap0dict = {v.key: [v] for v in hap0_vars}
         hap1dict = {v.key: [v] for v in hap1_vars}
         # collect_phasegroups expects dicts of variants, not lists
         vcf_vars = collect_phasegroups(hap0dict, hap1dict, aln, reference, minimum_safe_distance=100)
-        vcf_vars = [v for v in vcf_vars if v.pos >= self.region[1] and v.pos <= self.region[2]]
+        # vcf_vars = [v for v in vcf_vars if v.pos >= self.region[1] and v.pos <= self.region[2]]
 
         vcf_records = [
             vcf.create_vcf_rec(var, vcf_template)

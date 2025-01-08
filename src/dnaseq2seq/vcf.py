@@ -20,7 +20,7 @@ class Variant:
     ref: str
     alt: str
     pos: int
-    qual: float
+    qual: float = None
     hap_model: int = None
     step: int = None
     window_offset: int = None
@@ -28,6 +28,7 @@ class Variant:
     var_count: int = None
     aln_score: int = None
     tnpred: float = None
+    meta: dict = None
 
     def __str__(self):
         a = self.alt
@@ -68,25 +69,18 @@ class VcfVar:
     chrom: str
     pos: int
     ref: str
-    quals: list
     qual: float
     filter: list
     depth: int
     phased: bool
     phase_set: int
     haplotype: int
-    window_var_count: int
-    window_cis_vars: int
-    window_trans_vars: int
-    window_offset: List[int]
-    var_index: int
-    call_count: int
-    step_count: int
     genotype: tuple
     het: bool
     duplicate: bool
     alts: list
-    tnpred: List[float]
+    total_windows: int
+    total_calls: int
 
     @property
     def alt(self):
@@ -141,7 +135,7 @@ def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
     :returns: Generator over Variants from the paired sequences
     """
     mismatches = []
-    mismatch_quals = []
+    mismatch_meta = []
     mismatchstart = None
     for i, (a, b) in enumerate(zip(query, target)):
         if a == b:
@@ -150,19 +144,19 @@ def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
                               ref="".join(mismatches[0]).replace("-", ""),
                               alt="".join(mismatches[1]).replace("-", ""),
                               pos=mismatchstart,
-                              qual=_geomean(mismatch_quals),  # Geometric mean?
+                              meta=mismatch_meta,
                               window_offset=mismatchstart - cig_offset + window_offset,
                               )
             mismatches = []
-            mismatch_quals = []
+            mismatch_meta = []
         else:
             if mismatches:
                 mismatches[0] += a
                 mismatches[1] += b
-                mismatch_quals.append(probs[i])
+                mismatch_meta.append(probs[i])
             else:
                 mismatches = [a, b]
-                mismatch_quals = [probs[i]]
+                mismatch_meta = [probs[i]]
                 mismatchstart = i + cig_offset
 
     # Could be mismatches at the end
@@ -171,7 +165,7 @@ def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
                       ref="".join(mismatches[0]).replace("-", ""),
                       alt="".join(mismatches[1]).replace("-", ""),
                       pos=mismatchstart,
-                      qual=_geomean(mismatch_quals),
+                      meta=mismatch_meta,
                       window_offset=mismatchstart - cig_offset + window_offset)
 
 
@@ -258,7 +252,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
                         ref='',
                         alt=altseq[q_offset:q_offset+cig.len],
                         pos=offset + variant_pos_offset + aln.target_begin,
-                        qual=_geomean(probs[q_offset:q_offset+cig.len]),
+                        meta=probs[q_offset:q_offset+cig.len],
                         window_offset=variant_pos_offset,
                         var_index=num_vars)
                 )
@@ -272,7 +266,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
                         ref=refseq[t_offset:t_offset + cig.len],
                         alt='',
                         pos=offset + t_offset,
-                        qual=_geomean(probs[q_offset-1:q_offset+cig.len]),
+                        meta=probs[q_offset:q_offset+cig.len],
                         window_offset=t_offset,
                         var_index=num_vars)
                 )
@@ -304,6 +298,14 @@ def var_depth(chrom, pos, aln):
     )
     return count
 
+def compute_quality(var: Variant) -> float:
+    """
+    Compute quality of a variant
+    """
+    qual = 0
+    for m in var.meta:
+        qual += m['supporting_prob_sum'] / m['total_prob']
+    return qual / len(var.meta)
 
 def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
     """
@@ -330,24 +332,18 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             pos=pos + 1,
             ref=ref,
             alts=[alt],
-            quals=[call.qual for call in vars_hap0[var]],
-            qual=float(np.mean([call.qual for call in vars_hap0[var]])),
+            # quals=[call.qual for call in vars_hap0[var]],
+            qual=np.mean([compute_quality(call) for call in vars_hap0[var]]),
             filter=[],
             depth=depth,
             phased=False,  # default for now
             phase_set=phase_set,  # default to first var in window for now
             haplotype=0,  # defalt vars_hap0 to haplotype 0 for now
-            window_var_count=len(set(vars_hap0.keys()) | set(vars_hap1.keys())),
-            window_cis_vars=min(v.var_count for v in vars_hap0[var]),
-            window_trans_vars=len(vars_hap1),
-            call_count=len(vars_hap0[var]),
-            step_count=len(vars_hap0[var]),
             genotype=(0, 1),  # default to haplotype 0
             het=True,  # default to het but check later
             duplicate=False,  # initialize but check later
-            window_offset=[call.window_offset for call in vars_hap0[var]],
-            var_index=[call.var_index for call in vars_hap0[var]],
-            tnpred=[call.tnpred for call in vars_hap0[var]],
+            total_windows=int(np.mean([v['overlapping_windows'] for v in vars_hap0[var][0].meta])),
+            total_calls=int(np.mean([int(v['supporting_prob_sum']) for v in vars_hap0[var][0].meta])),
         )
 
     vcfvars_hap1 = {}
@@ -360,24 +356,17 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             pos=pos + 1,
             ref=ref,
             alts=[alt],
-            quals=[call.qual for call in vars_hap1[var]],
-            qual=float(np.mean([call.qual for call in vars_hap1[var]])),
+            qual=np.mean([compute_quality(call) for call in vars_hap1[var]]),
             filter=[],
             depth=depth,
             phased=False,  # default value for now
             phase_set=phase_set,  # default to first var position in window
             haplotype=1,  # defalt vars_hap1 to haplotype 1 for now
-            window_var_count=len(set(vars_hap0.keys()) | set(vars_hap1.keys())),
-            window_cis_vars=min(v.var_count for v in vars_hap1[var]),
-            window_trans_vars=len(vars_hap0),
-            call_count=len(vars_hap1[var]),
-            step_count=len(vars_hap1[var]),
             genotype=(1, 0),  # default to haplotype 1
             het=True,  # default to het but check later
             duplicate=False,  # initialize but check later
-            window_offset=[call.window_offset for call in vars_hap1[var]],
-            var_index=[call.var_index for call in vars_hap1[var]],
-            tnpred=[call.tnpred for call in vars_hap1[var]],
+            total_windows=int(np.mean([v['overlapping_windows'] for v in vars_hap1[var][0].meta])),
+            total_calls=int(np.mean([int(v['supporting_prob_sum']) for v in vars_hap1[var][0].meta])),
         )
 
     # check for homozygous vars
@@ -385,16 +374,12 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
     for var in homs:
         # modify hap0 var info
         vcfvars_hap0[var].qual = (vcfvars_hap0[var].qual + vcfvars_hap1[var].qual) / 2  # Mean of each call??
-        vcfvars_hap0[var].quals = vcfvars_hap0[var].quals + vcfvars_hap1[var].quals  # combine haps
-        vcfvars_hap0[var].window_cis_vars = min(vcfvars_hap0[var].window_cis_vars, vcfvars_hap1[var].window_cis_vars)  # cis and trans are now cis
-        vcfvars_hap0[var].window_trans_vars = 0  # moved all vars to cis
-        vcfvars_hap0[var].call_count += vcfvars_hap1[var].call_count  # combine call counts in both haplotypes
         vcfvars_hap0[var].genotype = (1, 1)
         vcfvars_hap0[var].het = False
-        vcfvars_hap0[var].window_offset = sorted(set(vcfvars_hap0[var].window_offset + vcfvars_hap1[var].window_offset))
-        vcfvars_hap0[var].tnpred =  [0] #np.mean(x for x in vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred)
-        # then remove from hap1 vars
+
         vcfvars_hap1.pop(var)
+        vcfvars_hap0[var].total_windows = vcfvars_hap0[var].total_windows + vcfvars_hap1[var].total_windows
+        vcfvars_hap0[var].total_calls = vcfvars_hap0[var].total_calls + vcfvars_hap1[var].total_calls
 
     # combine haplotypes
     assert len(set(vcfvars_hap0) & set(vcfvars_hap1)) == 0, (
@@ -405,12 +390,12 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
 
     for key, var in vcfvars.items():
         # adjust filters
-        if var.depth < mindepth:
-            var.filter.append("LowCov")
-        if var.call_count < 2:
-            var.filter.append("SingleCallHet")
-        elif var.step_count < 2:
-            var.filter.append("SingleCallHom")
+        # if var.depth < mindepth:
+        #     var.filter.append("LowCov")
+        # if var.call_count < 2:
+        #     var.filter.append("SingleCallHet")
+        # elif var.step_count < 2:
+        #     var.filter.append("SingleCallHom")
 
         # adjust insertions and deletions so no blank ref or alt
         if var.ref == "" or any(v == "" for v in var.alts):
@@ -483,28 +468,32 @@ def create_vcf_header(sample_name="sample", lowcov=30, cmdline=None):
     vcfh.add_meta('FORMAT', items=[('ID', "PS"), ('Number', "."), ('Type', 'Integer'),
                                    ('Description', 'Phase set equal to POS of first record in phased set')])
     # INFO items
-    vcfh.add_meta('INFO', items=[('ID', "WIN_VAR_COUNT"), ('Number', "."), ('Type', 'Integer'),
-                                 ('Description', 'Total variants called in same window(s)')])
-    vcfh.add_meta('INFO', items=[('ID', "WIN_CIS_COUNT"), ('Number', "."), ('Type', 'Integer'),
-                                 ('Description', 'Total cis variants called in same window(s)')])
-    vcfh.add_meta('INFO', items=[('ID', "WIN_TRANS_COUNT"), ('Number', "."), ('Type', 'Integer'),
-                                 ('Description', 'Total cis variants called in same window(s)')])
-    vcfh.add_meta('INFO', items=[('ID', "QUALS"), ('Number', "."), ('Type', 'Float'),
-                                 ('Description', 'QUAL value(s) for calls in window(s)')])
-    vcfh.add_meta('INFO', items=[('ID', "CALL_COUNT"), ('Number', "."), ('Type', 'Integer'),
-                                 ('Description', 'Number of model haplotype calls of this var in multi-step detection')])
-    vcfh.add_meta('INFO', items=[('ID', "STEP_COUNT"), ('Number', "."), ('Type', 'Integer'),
-                                 ('Description', 'Number of overlapping steps where var detected in multi-step detection')])
-    vcfh.add_meta('INFO', items=[('ID', "DUPLICATE"), ('Number', 1), ('Type', 'String'),
-                                 ('Description', 'Duplicate of call made in previous window')])
-    vcfh.add_meta('INFO', items=[('ID', "WIN_OFFSETS"), ('Number', "."), ('Type', 'Integer'),
-                                 ('Description', 'Position of call within calling window')])
-    vcfh.add_meta('INFO', items=[('ID', "VAR_INDEX"), ('Number', "."), ('Type', 'Integer'),
-                                 ('Description', 'Order of call in window')])
-    vcfh.add_meta('INFO', items=[('ID', "RAW_QUAL"), ('Number', 1), ('Type', 'Float'),
-                                 ('Description', 'Original quality if classifier used to update QUAL field')])
-    vcfh.add_meta('INFO', items=[('ID', "TNPRED"), ('Number', "."), ('Type', 'Float'),
-                                 ('Description', 'Predicted probability of being a true negative')])
+    vcfh.add_meta('INFO', items=[('ID', "TOTAL_WINDOWS"), ('Number', "."), ('Type', 'Integer'),
+                                   ('Description', 'Total number of windows overlapping variant')])
+    vcfh.add_meta('INFO', items=[('ID', "TOTAL_CALLS"), ('Number', "."), ('Type', 'Integer'),
+                                   ('Description', 'Total number of windows in which variant was called')])
+    # vcfh.add_meta('INFO', items=[('ID', "WIN_VAR_COUNT"), ('Number', "."), ('Type', 'Integer'),
+    #                              ('Description', 'Total variants called in same window(s)')])
+    # vcfh.add_meta('INFO', items=[('ID', "WIN_CIS_COUNT"), ('Number', "."), ('Type', 'Integer'),
+    #                              ('Description', 'Total cis variants called in same window(s)')])
+    # vcfh.add_meta('INFO', items=[('ID', "WIN_TRANS_COUNT"), ('Number', "."), ('Type', 'Integer'),
+    #                              ('Description', 'Total cis variants called in same window(s)')])
+    # vcfh.add_meta('INFO', items=[('ID', "QUALS"), ('Number', "."), ('Type', 'Float'),
+    #                              ('Description', 'QUAL value(s) for calls in window(s)')])
+    # vcfh.add_meta('INFO', items=[('ID', "CALL_COUNT"), ('Number', "."), ('Type', 'Integer'),
+    #                              ('Description', 'Number of model haplotype calls of this var in multi-step detection')])
+    # vcfh.add_meta('INFO', items=[('ID', "STEP_COUNT"), ('Number', "."), ('Type', 'Integer'),
+    #                              ('Description', 'Number of overlapping steps where var detected in multi-step detection')])
+    # vcfh.add_meta('INFO', items=[('ID', "DUPLICATE"), ('Number', 1), ('Type', 'String'),
+    #                              ('Description', 'Duplicate of call made in previous window')])
+    # vcfh.add_meta('INFO', items=[('ID', "WIN_OFFSETS"), ('Number', "."), ('Type', 'Integer'),
+    #                              ('Description', 'Position of call within calling window')])
+    # vcfh.add_meta('INFO', items=[('ID', "VAR_INDEX"), ('Number', "."), ('Type', 'Integer'),
+    #                              ('Description', 'Order of call in window')])
+    # vcfh.add_meta('INFO', items=[('ID', "RAW_QUAL"), ('Number', 1), ('Type', 'Float'),
+    #                              ('Description', 'Original quality if classifier used to update QUAL field')])
+    # vcfh.add_meta('INFO', items=[('ID', "TNPRED"), ('Number', "."), ('Type', 'Float'),
+    #                              ('Description', 'Predicted probability of being a true negative')])
     # write to new vcf file object
     return vcfh
 
@@ -526,9 +515,9 @@ def prob_to_phred(p, max_qual=1000.0):
 def create_vcf_rec(var, vcf_file):
     """
     create single variant record from pandas row
-    :param var:
-    :param vcf_file:
-    :return:
+    :param var: A VcfVar object
+    :param vcf_file: A pysam VariantFile object
+    :return: A pysam VariantRecord object
     """
     # Create record
     vcf_filter = var.filter if var.filter else "PASS"
@@ -542,17 +531,19 @@ def create_vcf_rec(var, vcf_file):
     r.samples['sample']['DP'] = var.depth
     r.samples['sample']['PS'] = var.phase_set
     # Set INFO values
-    r.info['WIN_VAR_COUNT'] = var.window_var_count
-    r.info['WIN_CIS_COUNT'] = var.window_cis_vars
-    r.info['WIN_TRANS_COUNT'] = var.window_trans_vars
-    r.info['QUALS'] = [float(x) for x in var.quals]
-    r.info['CALL_COUNT'] = var.call_count
-    r.info['STEP_COUNT'] = var.step_count
-    r.info['WIN_OFFSETS'] = [int(x) for x in var.window_offset]
-    r.info['VAR_INDEX'] = [int(x) for x in var.var_index]
-    r.info['TNPRED'] = 0 #[float(f"{x :.4f}") for x in var.tnpred]
-    if var.duplicate:
-        r.info['DUPLICATE'] = ()
+    r.info['TOTAL_WINDOWS'] = var.total_windows
+    r.info['TOTAL_CALLS'] = var.total_calls
+    # r.info['WIN_VAR_COUNT'] = var.window_var_count
+    # r.info['WIN_CIS_COUNT'] = var.window_cis_vars
+    # r.info['WIN_TRANS_COUNT'] = var.window_trans_vars
+    # r.info['QUALS'] = [float(x) for x in var.quals]
+    # r.info['CALL_COUNT'] = var.call_count
+    # r.info['STEP_COUNT'] = var.step_count
+    # r.info['WIN_OFFSETS'] = [int(x) for x in var.window_offset]
+    # r.info['VAR_INDEX'] = [int(x) for x in var.var_index]
+    # r.info['TNPRED'] = 0 #[float(f"{x :.4f}") for x in var.tnpred]
+    # if var.duplicate:
+    #     r.info['DUPLICATE'] = ()
     return r
 
 
