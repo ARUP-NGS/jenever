@@ -349,7 +349,7 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
     vcfvars_hap1 = {}
     for var in vars_hap1.keys():
         chrom, pos, ref, alt = var
-        logger.debug(f"Computing {var}")
+        logger.debug(f"Generating VcfVar for {var}")
         depth = var_depth(chrom, pos, aln)
         vcfvars_hap1[var] = VcfVar(
             chrom=chrom,

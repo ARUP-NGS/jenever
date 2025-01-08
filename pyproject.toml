@@ -24,6 +24,7 @@ dependencies = [
     "tqdm",
     "torch>=2.2",
     "pytest"
+    "levenshtein",
 ]
 urls = { "Homepage" = "https://github.com/ARUP-NGS/jenever" }
 

@@ -421,7 +421,7 @@ def encode_single_region(aln, reference, chrom, start, end, max_read_depth, wind
     batch = []
     batch_offsets = []
     readwindow = bam.ReadWindow(aln, chrom, start - 150, end + window_size)
-    logger.debug(f"Encoding region {chrom}:{start}-{end}")
+    logger.debug(f"Generating windows {chrom} window start: {window_start} step: {window_step}")
     returned_count = 0
     while window_start <= (end - 0.2 * window_size):
         try:
@@ -1045,9 +1045,10 @@ class WindowResult:
             print(g.hap0[0:20] + "..." + "\t" + ", ".join(str(v) for v in g.vars_hap0))
             print(g.hap1[0:20] + "..." + "\t" + ", ".join(str(v) for v in g.vars_hap1))
 
-    def merge_haplotypes(self, refpath: str, bampath: str, vcf_template: pysam.VariantFile):
+    def merge_haplotypes(self, refpath: str, bampath: str, vcf_template: pysam.VariantFile, region_buffer: int = 20):
         """
         Merge the haplotypes into a single string
+        :param region_buffer: Number of bases to extend the region of interest in both upstream and downstream directions. This is because sometimes detected variants actually end up aligning outside the region of interest, and I think we still want to report them
         """
         reference = pysam.FastaFile(refpath)
         aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
@@ -1092,6 +1093,7 @@ class WindowResult:
         hap0dict = {v.key: [v] for v in hap0_vars}
         hap1dict = {v.key: [v] for v in hap1_vars}
         vcf_vars = collect_phasegroups(hap0dict, hap1dict, aln, reference, minimum_safe_distance=100)
+        vcf_vars = [v for v in vcf_vars if self.region[1] - region_buffer <= v.pos <= self.region[2] + region_buffer]
 
         vcf_records = [
             vcf.create_vcf_rec(var, vcf_template)
