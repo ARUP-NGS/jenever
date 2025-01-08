@@ -863,7 +863,7 @@ def call_and_merge(batch, batch_offsets, regions, model, reference, max_batch_si
     return window_results
 
 
-def merge_multialts(v0, v1):
+def merge_multialts(v0: pysam.VariantRecord, v1: pysam.VariantRecord):
     """
     Merge two VcfVar objects into a single one with two alts
 
@@ -872,6 +872,7 @@ def merge_multialts(v0, v1):
       -->
     ATCT   G,GCACT
 
+    : returns: pysam.VariantRecord object with two alts
     """
     assert v0.pos == v1.pos
     #assert v0.het and v1.het
@@ -891,14 +892,16 @@ def merge_multialts(v0, v1):
         return longer
 
 
-def het(rec):
+def het(rec: pysam.VariantRecord):
     return rec.samples[0]['GT'] == (0,1) or rec.samples[0]['GT'] == (1,0)
 
 
-def merge_overlaps(overlaps, min_qual):
+def reconcile_overlapping_vcfvars(overlaps: List[pysam.VariantRecord], min_qual: float):
     """
      Attempt to merge overlapping VCF records in a sane way
      As a special case if there is only one input record we just return that
+
+     :returns: List of pysam.VariantRecord objects after fixing overlapping variants
     """
     if len(overlaps) == 1:
         return [overlaps[0]]
@@ -966,6 +969,61 @@ def collect_phasegroups(vars_hap0, vars_hap1, aln, reference, minimum_safe_dista
     )
     all_vcf_vars.extend(vcf_vars)
     return all_vcf_vars
+
+
+def merge_overlapping_vars(vcf_records: List[pysam.VariantRecord], min_merge_qual: float):
+    """
+    Find overlapping variants and either merge them into multi-alts (if they share the same start position) 
+    or modify their genotypes to be half-calls (if they don't share the same start position)
+    : returns: List of pysam.VariantRecord objects after fixing overlapping variants
+    """
+    merged = []
+    if len(vcf_records) == 0:
+        return []
+
+    # Handle overlapping variants by grouping them
+    overlaps = [vcf_records[0]]
+    for rec in vcf_records[1:]:
+        if overlaps and util.records_overlap(overlaps[-1], rec):
+            overlaps.append(rec) 
+        else:
+            # Process the current group of overlapping variants
+            if len(overlaps) > 1:
+                # If variants share same position, merge into multi-alt
+                if all(v.pos == overlaps[0].pos for v in overlaps):
+                    # Only merge high quality variants
+                    high_qual = sorted([v for v in overlaps if v.qual >= min_merge_qual], key=lambda x: x.qual, reverse=True)
+                    if len(high_qual) > 1:
+                        # Create merged record with all alt alleles
+                        multialt = merge_multialts(high_qual[0], high_qual[1])
+                        merged.append(multialt)
+                    else:
+                        # Keep highest quality variant if can't merge
+                        best = max(overlaps, key=lambda x: x.qual)
+                        merged.append(best)
+                else:
+                    # Overlapping but different positions - mark as half-calls
+                    merged.extend(reconcile_overlapping_vcfvars(overlaps, min_qual=min_merge_qual))
+            else:
+                merged.append(overlaps[0])
+            overlaps = [rec]
+
+    # Handle final group
+    if len(overlaps) > 1:
+        if all(v.pos == overlaps[0].pos for v in overlaps):
+            high_qual = sorted([v for v in overlaps if v.qual >= min_merge_qual], key=lambda x: x.qual, reverse=True)
+            if len(high_qual) > 1:
+                multialt = merge_multialts(high_qual[0], high_qual[1])
+                merged.append(multialt)
+            else:
+                best = max(overlaps, key=lambda x: x.qual)
+                merged.append(best)
+        else:
+            merged.extend(reconcile_overlapping_vcfvars(overlaps, min_qual=min_merge_qual))
+    elif len(overlaps) == 1:
+        merged.append(overlaps[0])
+
+    return merged
 
 
 class GenotypePrediction:
@@ -1100,6 +1158,9 @@ class WindowResult:
             for var in sorted(vcf_vars, key=lambda x: x.pos)
         ]
 
+        #Last but not least, find overlapping variants and either merge them into multi-alts (if they share the same start position) 
+        # or modify their genotypes to be half-calls (if they don't share the same start position)
+        vcf_records = merge_overlapping_vars(vcf_records, min_merge_qual=3)
         return vcf_records
         
 
@@ -1147,14 +1208,14 @@ class WindowResult:
             if overlaps and util.records_overlap(overlaps[-1], rec):
                 overlaps.append(rec)
             elif overlaps:
-                result = merge_overlaps(overlaps, min_qual=min_merge_qual)
+                result = reconcile_overlapping_vcfvars(overlaps, min_qual=min_merge_qual)
                 merged.extend(result)
                 overlaps = [rec]
             else:
                 overlaps = [rec]
 
         if overlaps:
-            merged.extend(merge_overlaps(overlaps, min_qual=min_merge_qual))
+            merged.extend(reconcile_overlapping_vcfvars(overlaps, min_qual=min_merge_qual))
         else:
             merged.append(rec)
 

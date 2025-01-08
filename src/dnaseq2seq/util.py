@@ -326,8 +326,8 @@ def check_overlap(interval1, interval2):
 def records_overlap(rec1, rec2):
     """ True if the two records share any reference bases """
     return check_overlap(
-        (rec1.pos, rec1.pos + (len(rec1.ref) - len(rec1.alts[0]))),
-        (rec2.pos, rec2.pos + (len(rec2.ref) - len(rec2.alts[0]))),
+        (rec1.pos, rec1.pos + len(rec1.ref)),
+        (rec2.pos, rec2.pos + len(rec2.ref)),
     )
 
 
