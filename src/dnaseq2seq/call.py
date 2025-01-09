@@ -1079,6 +1079,10 @@ class GenotypePrediction:
         
 
 def calc_cis_trans_distance(g0: GenotypePrediction, g1: GenotypePrediction):
+    """
+    Compute the Levenshtein distance between the two haplotypes in both cis and trans orientations in the overlapping region
+    :returns: Tuple of cis and trans distances
+    """
     start = max(g0.offset, g1.offset)
     end = min(g0.end, g1.end)
     assert end > start

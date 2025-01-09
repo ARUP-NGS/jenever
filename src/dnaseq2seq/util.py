@@ -1,4 +1,5 @@
 import collections
+import sortedcontainers
 import itertools
 import datetime
 import os
@@ -317,10 +318,11 @@ def _varkey(variant):
 def check_overlap(interval1, interval2):
     """
     Return True if the intervals overlap
+    Assumes half-open intervals such that [5,10] and [10,15] will NOT overlap
     """
     start1, end1 = interval1
     start2, end2 = interval2
-    return not (end1 < start2 or end2 < start1)
+    return not (end1 <= start2 or end2 <= start1)
 
 
 def records_overlap(rec1, rec2):
@@ -514,12 +516,24 @@ class SortedVariantWriter:
         """
         self.outputfh = outputfh
         self.chrom_order = chrom_order
-        self.buffer = collections.defaultdict(list) 
+        # Use SortedList to maintain sorted order within each chromosome
+        self.buffer = collections.defaultdict(lambda: sortedcontainers.SortedList(key=lambda x: x.pos))
 
     def put(self, v):
         if self.chrom_order is not None and v.chrom not in self.chrom_order:
             raise ValueError(f"Unknown chromosome: {v.chrom}")
-        self.buffer[v.chrom].append(v)
+        # Check if a variant with the same position already exists, if it does, compare the chrom, ref, alt fields to see if this is a duplicate
+        existing = self.buffer[v.chrom].bisect_key_left(v.pos)
+        if existing < len(self.buffer[v.chrom]) and self.buffer[v.chrom][existing].pos == v.pos:
+            existing_v = self.buffer[v.chrom][existing]
+            if existing_v.ref == v.ref and existing_v.alts == v.alts:
+                if existing_v.qual < v.qual:
+                    self.buffer[v.chrom].remove(existing_v)
+                    self.buffer[v.chrom].add(v)
+                else:
+                    return
+
+        self.buffer[v.chrom].add(v)
 
     def put_all(self, items):
         for v in items:
@@ -534,7 +548,7 @@ class SortedVariantWriter:
         logger.info(f"Writing variants from {len(self.buffer)} chroms")
         for chrom in self.chrom_order:
             logger.info(f"Writing variants from {chrom}")
-            for v in sorted(self.buffer[chrom], key=lambda x: x.pos):
+            for v in self.buffer[chrom]:
                 self.outputfh.write(str(v))
             self.buffer[chrom] = []
             self.outputfh.flush()
