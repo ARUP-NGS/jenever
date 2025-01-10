@@ -30,7 +30,13 @@ from dnaseq2seq import hapmerger
 
 logger = logging.getLogger(__name__)
 
-DEVICE = torch.device("cuda") if hasattr(torch, 'cuda') and torch.cuda.is_available() else torch.device("cpu")
+if hasattr(torch, 'cuda') and torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    logger.info("Using MPS backend")
+    DEVICE = torch.device("mps")
+else:
+    DEVICE = torch.device("cpu")
 
 import warnings
 warnings.filterwarnings(action='ignore')
