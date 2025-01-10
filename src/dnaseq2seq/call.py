@@ -1115,7 +1115,7 @@ def modify_snvs_overlapping_dels(hap0_vars: List[vcf.Variant], hap1_vars: List[v
             continue
         overlaps = []
         for v in hap0_vars:
-            if d.pos <= v.pos <= d.pos + len(d.ref):
+            if len(v.ref) == 1 and d.pos <= v.pos <= d.pos + len(d.ref):
                 overlaps.append(v)
         if overlaps:
             newvar = merge_and_pad_vars(d, overlaps)
