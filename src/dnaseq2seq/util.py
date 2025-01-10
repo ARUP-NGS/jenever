@@ -517,23 +517,13 @@ class SortedVariantWriter:
         self.outputfh = outputfh
         self.chrom_order = chrom_order
         # Use SortedList to maintain sorted order within each chromosome
-        self.buffer = collections.defaultdict(lambda: sortedcontainers.SortedList(key=lambda x: x.pos))
+        self.buffer = collections.defaultdict(list)
 
     def put(self, v):
         if self.chrom_order is not None and v.chrom not in self.chrom_order:
             raise ValueError(f"Unknown chromosome: {v.chrom}")
         # Check if a variant with the same position already exists, if it does, compare the chrom, ref, alt fields to see if this is a duplicate
-        existing = self.buffer[v.chrom].bisect_key_left(v.pos)
-        if existing < len(self.buffer[v.chrom]) and self.buffer[v.chrom][existing].pos == v.pos:
-            existing_v = self.buffer[v.chrom][existing]
-            if existing_v.ref == v.ref and existing_v.alts == v.alts:
-                if existing_v.qual < v.qual:
-                    self.buffer[v.chrom].remove(existing_v)
-                    self.buffer[v.chrom].add(v)
-                else:
-                    return
-
-        self.buffer[v.chrom].add(v)
+        self.buffer[v.chrom].append(v)
 
     def put_all(self, items):
         for v in items:
@@ -547,9 +537,13 @@ class SortedVariantWriter:
             self.chrom_order = sorted(self.buffer.keys(), key=default_chrom_sort_key)
         logger.info(f"Writing variants from {len(self.buffer)} chroms")
         for chrom in self.chrom_order:
+            prev = None
             logger.info(f"Writing variants from {chrom}")
-            for v in self.buffer[chrom]:
+            for v in sorted(self.buffer[chrom], key=lambda x: x.pos):
+                if prev is not None and prev.pos == v.pos and prev.ref == v.ref and prev.alts == v.alts:
+                    continue
                 self.outputfh.write(str(v))
+                prev = v
             self.buffer[chrom] = []
             self.outputfh.flush()
 
