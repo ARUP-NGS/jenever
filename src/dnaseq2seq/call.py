@@ -1082,7 +1082,49 @@ class GenotypePrediction:
             v.tnpred = self.tn_prob
         self.vars_hap0 = vars_hap0
         self.vars_hap1 = vars_hap1
-        
+
+
+def merge_and_pad_vars(target: vcf.Variant, overlaps: List[vcf.Variant]):
+    """
+    When one or more SNVs overlap a deletion, we need to merge the SNVs and pad them so they have
+    the same start position as the target deletion
+    """
+    overlaps = sorted(overlaps, key=lambda x: x.pos)
+    ref = target.ref
+    newalt = list(ref)
+    
+    for o in overlaps:
+        alt = o.alt if o.alt else " " # Empty strings not handled correctly when we assign into list
+        newalt[o.pos - target.pos:o.pos - target.pos + len(o.ref)] = alt
+    
+    newvar = overlaps[0].copy()
+    newvar.alt = "".join(newalt).replace(" ", "")
+    newvar.pos = target.pos
+    newvar.ref = ref
+    return newvar
+
+
+def modify_snvs_overlapping_dels(hap0_vars: List[vcf.Variant], hap1_vars: List[vcf.Variant]):
+    """
+    Modify SNVs overlapping deletions to be half-calls
+    """
+    hap0_dels = [v for v in hap0_vars if len(v.ref) > 1] # Anything with more than one reference base
+    hap1_dels = [v for v in hap1_vars if len(v.ref) > 1]
+    for d in hap1_dels:
+        if d in hap0_dels: # Homozygous, don't do anything
+            continue
+        overlaps = []
+        for v in hap0_vars:
+            if d.pos <= v.pos <= d.pos + len(d.ref):
+                overlaps.append(v)
+        if overlaps:
+            newvar = merge_and_pad_vars(d, overlaps)
+            for o in overlaps:
+                hap0_vars.remove(o)
+            hap0_vars.append(newvar)
+
+    return hap0_vars
+         
 
 def calc_cis_trans_distance(g0: GenotypePrediction, g1: GenotypePrediction):
     """
@@ -1156,6 +1198,11 @@ class WindowResult:
         # Then, align the merged haplotype to the reference genome and pluck out variants from there
         hap0_vars = vcf.aln_to_vars(refseq, h0_merged, self.region[0], start, h0_merge_info)
         hap1_vars = vcf.aln_to_vars(refseq, h1_merged, self.region[0], start, h1_merge_info)
+        
+        # When small vars overlap deletions on the other haplotype, we need to pad and maybe
+        # merge them into a single variant to avoid weird half-calls downstream
+        hap0_vars = modify_snvs_overlapping_dels(hap0_vars, hap1_vars)
+        hap1_vars = modify_snvs_overlapping_dels(hap1_vars, hap0_vars)
 
         # collect_phasegroups expects dicts of variants, not lists
         hap0dict = {v.key: [v] for v in hap0_vars}
