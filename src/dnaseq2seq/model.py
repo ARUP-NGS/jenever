@@ -22,7 +22,7 @@ class PositionalEncoding2D(nn.Module):
         self.device = device
         channels = int(np.ceil(channels/4)*2)
         self.channels = channels
-        inv_freq = 1. / (10000 ** (torch.arange(0, channels, 2).float() / channels))
+        inv_freq = 1. / (10000 ** (torch.arange(0, channels, 2, device=self.device).float() / channels))
         self.register_buffer('inv_freq', inv_freq)
         self.cache_shape = None
         self.enc_cache = None
@@ -33,8 +33,8 @@ class PositionalEncoding2D(nn.Module):
             return self.enc_cache
         else:
             batch_size, x, y, orig_ch = tensor.shape
-            pos_x = torch.arange(x, device=tensor.device).type(self.inv_freq.type())
-            pos_y = torch.arange(y, device=tensor.device).type(self.inv_freq.type())
+            pos_x = torch.arange(x, device=tensor.device, dtype=self.inv_freq.dtype) #.type(self.inv_freq.type())
+            pos_y = torch.arange(y, device=tensor.device, dtype=self.inv_freq.dtype) #.type(self.inv_freq.type())
             sin_inp_x = torch.einsum("i,j->ij", pos_x, self.inv_freq)
             sin_inp_y = torch.einsum("i,j->ij", pos_y, self.inv_freq)
             emb_x = torch.cat((sin_inp_x.sin(), sin_inp_x.cos()), dim=-1).unsqueeze(1)
@@ -57,13 +57,13 @@ class PositionalEncoding2D(nn.Module):
 
         #emb = self._from_cache(tensor)
         batch_size, x, y, orig_ch = tensor.shape
-        pos_x = torch.arange(x, device=tensor.device).type(self.inv_freq.type())
-        pos_y = torch.arange(y, device=tensor.device).type(self.inv_freq.type())
+        pos_x = torch.arange(x, device=tensor.device, dtype=self.inv_freq.dtype) #.type(self.inv_freq.type())
+        pos_y = torch.arange(y, device=tensor.device, dtype=self.inv_freq.dtype) #.type(self.inv_freq.type())
         sin_inp_x = torch.einsum("i,j->ij", pos_x, self.inv_freq)
         sin_inp_y = torch.einsum("i,j->ij", pos_y, self.inv_freq)
         emb_x = torch.cat((sin_inp_x.sin(), sin_inp_x.cos()), dim=-1).unsqueeze(1)
         emb_y = torch.cat((sin_inp_y.sin(), sin_inp_y.cos()), dim=-1)
-        emb = torch.zeros((x, y, self.channels * 2), device=tensor.device).type(tensor.type())
+        emb = torch.zeros((x, y, self.channels * 2), device=tensor.device, dtype=tensor.dtype) #.type(tensor.type())
         emb[:, :, :self.channels] = emb_x
         emb[:, :, self.channels:2 * self.channels] = emb_y
         #emb = emb.bfloat16()

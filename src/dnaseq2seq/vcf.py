@@ -44,7 +44,13 @@ class Variant:
 
     def __gt__(self, other):
         return self.pos > other.pos
+    
+    def __copy__(self):
+        return Variant(chrom=self.chrom, ref=self.ref, alt=self.alt, pos=self.pos, qual=self.qual, hap_model=self.hap_model, step=self.step, window_offset=self.window_offset, var_index=self.var_index, var_count=self.var_count, aln_score=self.aln_score, tnpred=self.tnpred, meta=self.meta)
 
+    def copy(self):
+        return self.__copy__()
+    
     @property
     def end(self):
         return self.pos + len(self.ref)
