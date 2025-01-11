@@ -13,8 +13,9 @@ class RefSeqMap:
     There's also a 'skip' operator that maps to None, which is used when the beginning of the target sequence alignment
     doesn't start at base 0 of the query (reference) sequence
     """
-    def __init__(self, aln, probs=None):
+    def __init__(self, aln, ref_offset: int, probs=None):
         self.aln = aln
+        self.ref_offset = ref_offset
         if probs is not None:
             assert len(probs) == len(self.aln.target_sequence)
             self.probs = probs
@@ -88,8 +89,12 @@ class RefSeqMap:
                 raise ValueError(f"Unknown cigar op {cig.op}")
         return refmap
     
-    def __getitem__(self, idx):
-        return self.refmap[idx]
+    def __getitem__(self, ref_pos):
+        idx = ref_pos - self.ref_offset
+        if idx < 0 or idx >= len(self.refmap):
+            return None
+        else:
+            return self.refmap[idx]
     
     def __len__(self):
         return len(self.refmap)
@@ -101,25 +106,29 @@ class RefSeqMap:
 class MultiRefMap:
     def __init__(self, refmaps: List[RefSeqMap]):
         self.refmaps = refmaps
-        for rm in refmaps:
-            if rm.ref_bases() != refmaps[0].ref_bases():
-                m = []
-                for i, (a,b) in enumerate(zip(rm.ref_bases(), refmaps[0].ref_bases())):
-                    if a != b:
-                        m.append(f"{i}: {a} != {b}")
-                    else:
-                        m.append(f"{i}: {a} == {b}")
-                print("\n".join(m))
-                raise Exception(f"Refmaps do not have idential ref bases at positions {m}")
+        self.ref_min = min([rm.ref_offset for rm in refmaps])
+        self.ref_max = max([rm.ref_offset + len(rm) for rm in refmaps])
+        self.refbases = []
+        for i in range(self.ref_min, self.ref_max):
+            bset = set()
+            for rm in refmaps:
+                b = rm[i]
+                if b is not None:
+                    bset.add(b['ref'])
+            if len(bset) == 1:
+                self.refbases.append(bset.pop())
+            else:
+                raise Exception(f"Multiple bases at position {i} (ref pos {i+self.ref_min}): {bset}")
+        
 
     def __getitem__(self, idx):
         return [rm[idx] for rm in self.refmaps]
     
     def __len__(self):
-        return len(self.refmaps[0])
+        return len(self.refbases)
     
     def ref_bases(self):
-        return self.refmaps[0].ref_bases()
+        return self.refbases
     
 
 def merge_refmaps(maps: MultiRefMap):
@@ -138,18 +147,20 @@ def merge_refmaps(maps: MultiRefMap):
     """
     merged_haplotype = []
     meta = []
-    for i in range(len(maps)):
+    for i in range(maps.ref_min, maps.ref_max):
         counts = Counter()
         bases = maps[i]
         for b in bases:
+            if b is None:
+                continue
             counts[b['target']] += b['prob']
         
         most_common_base, most_common_prob_sum = counts.most_common(1)[0]
         merged_haplotype.append(most_common_base)
         meta.append({
-            "overlapping_windows": len([b for b in bases if b['target'] is not None]),
+            "overlapping_windows": len([b for b in bases if b is not None]),
             "total_bases": len(bases),
-            "total_prob": sum(b['prob'] for b in bases if b['target'] is not None),
+            "total_prob": sum(b['prob'] for b in bases if b is not None),
             "supporting_prob_sum": most_common_prob_sum,
         })
     
@@ -175,28 +186,30 @@ def fmt(s):
         return s.ljust(5)
 
 
-def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array]], ref_seq: str, pos_offset: int = 0):
+def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array, int]], ref_seq: str, ref_start: int):
     """
     Merge the overlapping haplotypes into a single sequence
     The algorithm here is to align each haplotype to the reference sequence and then merge the aligned haplotypes
     """
-    ssw = StripedSmithWaterman(ref_seq,
-                               gap_open_penalty=5,
-                               gap_extend_penalty=0.1,
-                               match_score=1,
-                               mismatch_score=-1)
+
     refmaps = []
-    for i, (hapseq, probs) in enumerate(haplotypes):
+    for i, (hapseq, probs, ref_offset) in enumerate(haplotypes):
+        seq_offset = ref_offset - ref_start
+        ssw = StripedSmithWaterman(ref_seq[seq_offset:seq_offset+len(hapseq)],
+                            gap_open_penalty=5,
+                            gap_extend_penalty=0.1,
+                            match_score=1,
+                            mismatch_score=-1)
         aln = ssw(hapseq)
-        refmap = RefSeqMap(aln, probs)
+        refmap = RefSeqMap(aln, ref_offset, probs)
         refmaps.append(refmap)
 
     refmaps = MultiRefMap(refmaps)
 
     # refbase = refmaps.ref_bases()
-    # for i in range(len(refmaps)):
-    #     d = " ".join(fmt(r['target']) for r in refmaps[i])
-    #     print(f"{i}\t{i+pos_offset :5}\t{refbase[i]}\t{d}")
+    # for i in range(refmaps.ref_min, refmaps.ref_max):
+    #     d = " ".join(fmt(r['target']) if r else "  N   " for r in refmaps[i])
+    #     print(f"{i}\t{i+ref_start :5}\t{refbase[i - refmaps.ref_min]}\t{d}")
 
     merged, merge_info = merge_refmaps(refmaps)
     return merged, merge_info
