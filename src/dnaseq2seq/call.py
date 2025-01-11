@@ -555,7 +555,7 @@ def merge_datas(datas):
     return allencoded, batch_start_pos, batch_regions
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def call_multi_paths(datas, model, refpath, bampath, classifier_model, vcf_template, max_batch_size):
     """
     Concat a list of 'datas' objects, which contain encoded_pileups, batch offsets, and then call variants over all of them
@@ -861,7 +861,7 @@ def call_and_merge(batch, batch_offsets, regions, model, reference, max_batch_si
         genopreds = []  
         for hap_info in rhaps:
             gt = GenotypePrediction(region, **hap_info)
-            gt.aln_vars(reference)
+            # gt.aln_vars(reference)
             genopreds.append(gt)
         
         window_results.append(WindowResult(region, genopreds))
@@ -1146,7 +1146,7 @@ class WindowResult:
     def __init__(self, region: Tuple[str, int, int], genotype_predictions: List[GenotypePrediction]):
         self.region = region
         self.genotype_predictions = genotype_predictions
-        self.vars_hap0, self.vars_hap1 = self._resolve_haplotypes()
+        self.vars_hap0, self.vars_hap1 = None, None #self._resolve_haplotypes()
     
     def print_genotype_predictions(self):
         print(f"Region: {self.region}")
@@ -1178,17 +1178,17 @@ class WindowResult:
                 b.swap()
         
         # Then, merge the haplotypes
-        h0_haps = [(g.hap0, g.probs0) for g in self.genotype_predictions]
-        h1_haps = [(g.hap1, g.probs1) for g in self.genotype_predictions]
+        h0_haps = [(g.hap0, g.probs0, g.offset) for g in self.genotype_predictions]
+        h1_haps = [(g.hap1, g.probs1, g.offset) for g in self.genotype_predictions]
         try:
-            h0_merged, h0_merge_info = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, pos_offset=start)
+            h0_merged, h0_merge_info = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, ref_start=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap0: {ex}")
             logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
         try:
-            h1_merged, h1_merge_info = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, pos_offset=start)
+            h1_merged, h1_merge_info = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, ref_start=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap1: {ex}")
             logger.error(f"window is: {self.print_genotype_predictions()}")
