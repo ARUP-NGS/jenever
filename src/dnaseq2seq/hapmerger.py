@@ -194,7 +194,7 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array, int]], ref_
 
     refmaps = []
     for i, (hapseq, probs, ref_offset) in enumerate(haplotypes):
-        seq_offset = max(0, ref_offset - ref_start - 10)
+        seq_offset = max(0, ref_offset - ref_start - 0)
         ssw = StripedSmithWaterman(ref_seq[seq_offset:seq_offset+len(hapseq) + 10],
                             gap_open_penalty=5,
                             gap_extend_penalty=0.1,
