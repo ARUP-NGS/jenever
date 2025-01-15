@@ -1150,6 +1150,8 @@ class WindowResult:
     
     def print_genotype_predictions(self):
         print(f"Region: {self.region}")
+        if self.vars_hap0 is None:
+            self.vars_hap0, self.vars_hap1 =self._resolve_haplotypes()
         for i, g in enumerate(self.genotype_predictions):
             print(f"Genotype {i}: {g.offset} - {g.end} TN pred: {g.tn_prob :.5f}")
             print(g.hap0[0:20] + "..." + "\t" + ", ".join(str(v) for v in g.vars_hap0))
@@ -1184,14 +1186,14 @@ class WindowResult:
             h0_merged, h0_merge_info = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, ref_start=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap0: {ex}")
-            logger.error(f"window is: {self.print_genotype_predictions()}")
+            #logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
         try:
             h1_merged, h1_merge_info = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, ref_start=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap1: {ex}")
-            logger.error(f"window is: {self.print_genotype_predictions()}")
+            #logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
 

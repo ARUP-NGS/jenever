@@ -118,7 +118,7 @@ class MultiRefMap:
             if len(bset) == 1:
                 self.refbases.append(bset.pop())
             else:
-                raise Exception(f"Multiple bases at position {i} (ref pos {i+self.ref_min}): {bset}")
+                raise Exception(f"Multiple bases at position {i}: {bset}")
         
 
     def __getitem__(self, idx):
@@ -201,7 +201,7 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array, int]], ref_
                             match_score=1,
                             mismatch_score=-1)
         aln = ssw(hapseq)
-        refmap = RefSeqMap(aln, ref_offset, probs)
+        refmap = RefSeqMap(aln, seq_offset, probs)
         refmaps.append(refmap)
 
     refmaps = MultiRefMap(refmaps)
