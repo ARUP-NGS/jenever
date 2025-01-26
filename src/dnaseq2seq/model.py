@@ -158,7 +158,8 @@ class VarTransformer(nn.Module):
                  d_ff,
                  embed_dim_factor,
                  n_encoder_layers,
-                 n_decoder_layers,
+                 n_decoder_layers_per_block,
+                 n_decoder_blocks,
                  decoder_embed_dim,
                  p_dropout=0.1,
                  device='cpu'):
@@ -170,6 +171,8 @@ class VarTransformer(nn.Module):
         self.decoder_embed_dim = decoder_embed_dim
         self.embed_dim = encoder_attention_heads * embed_dim_factor
         self.fc1_hidden = 12
+        self.n_decoder_blocks = n_decoder_blocks
+        self.n_decoder_layers_per_block = n_decoder_layers_per_block
 
         self.fc1 = nn.Linear(feature_count, self.fc1_hidden)
         self.fc2 = nn.Linear(self.read_depth * self.fc1_hidden, self.embed_dim)
@@ -194,12 +197,10 @@ class VarTransformer(nn.Module):
         #     dropout=p_dropout,
         #     batch_first=True,
         #     activation='gelu')
-        n_decoder_layers_per_block = 4
-        n_blocks = 2
         self.decoder = CrossTalkDecoders(self.decoder_embed_dim, self.kmer_dim, decoder_attention_heads, d_ff, 
                                     n_decoder_layers_per_block=n_decoder_layers_per_block,
                                     p_dropout=p_dropout,
-                                    n_blocks=n_blocks)
+                                    n_blocks=n_decoder_blocks)
         self.tgt_input_converter = nn.Linear(self.kmer_dim, self.decoder_embed_dim)
         # self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
         # self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)

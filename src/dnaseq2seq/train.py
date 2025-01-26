@@ -320,21 +320,22 @@ def load_model(modelconf, ckpt):
 
     logger.info(f"Model conf: {modelconf}")
     model = VarTransformer(read_depth=modelconf.get('max_read_depth', 150),
-                           feature_count=modelconf['feats_per_read'],
-                           kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
-                           n_encoder_layers=modelconf['encoder_layers'],
-                           n_decoder_layers=modelconf['decoder_layers'],
-                           embed_dim_factor=modelconf['embed_dim_factor'],
-                           encoder_attention_heads=modelconf['encoder_attention_heads'],
-                           decoder_attention_heads=modelconf['decoder_attention_heads'],
+                            feature_count=modelconf['feats_per_read'],
+                            kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
+                            n_encoder_layers=modelconf['encoder_layers'],
+                            embed_dim_factor=modelconf['embed_dim_factor'],
+                            encoder_attention_heads=modelconf['encoder_attention_heads'],
+                            decoder_attention_heads=modelconf['decoder_attention_heads'],
                             decoder_embed_dim=modelconf['decoder_embed_dim'],
-                           d_ff=modelconf['dim_feedforward'],
-                           device=DEVICE)
+                            n_decoder_blocks=modelconf['n_decoder_blocks'],
+                            n_decoder_layers_per_block=modelconf['n_decoder_layers_per_block'],
+                            d_ff=modelconf['dim_feedforward'],
+                            device=DEVICE)
 
     
     model_tot_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     encoder_tot_params = sum(p.numel() for p in model.encoder.parameters() if p.requires_grad)
-    decoder_tot_params = 2 * sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
+    decoder_tot_params = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
     
     logger.info(f"Creating model with {model_tot_params} trainable params")
     logger.info(f"Encoder tot params: {encoder_tot_params} ")
