@@ -393,8 +393,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     hap_embedder = HapEmbedder(hap_dim=(4*148), embed_dim=model.embed_dim, device=DEVICE)
     cls_embedder = CLSEmbedder(input_dim=model.embed_dim, hidden_dim=128, output_dim=model.embed_dim, device=DEVICE)
