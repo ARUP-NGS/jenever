@@ -350,7 +350,7 @@ def load_model(modelconf, ckpt):
     #model.fc2.requires_grad_(False)
     
     # logger.info("Compiling model...")
-    # model = torch.compile(model)
+    model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
@@ -599,7 +599,10 @@ def train(output_model, **kwargs):
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
 
-    val_loader = loader.PregenLoader(device=DEVICE, datadir=kwargs.get('val_dir'), max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
+    val_loader = loader.TruncateDepthLoader(
+            loader.PregenLoader(device=DEVICE, datadir=kwargs.get('val_dir'), max_decomped_batches=4, threads=8, tgt_prefix="tgkmers"),
+            model_unwrapped.read_depth
+            )
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
