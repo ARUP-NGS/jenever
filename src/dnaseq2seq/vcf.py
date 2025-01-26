@@ -76,6 +76,8 @@ class VcfVar:
     pos: int
     ref: str
     qual: float
+    ref_tot_prob: float
+    alt_tot_prob: float
     filter: list
     depth: int
     phased: bool
@@ -350,6 +352,8 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             duplicate=False,  # initialize but check later
             total_windows=int(np.mean([v['overlapping_windows'] for v in vars_hap0[var][0].meta])),
             total_calls=int(np.mean([int(v['supporting_prob_sum']) for v in vars_hap0[var][0].meta])),
+            ref_tot_prob=np.mean([v['ref_mean_prob'] for v in vars_hap0[var][0].meta]),
+            alt_tot_prob=np.mean([v['alt_mean_prob'] for v in vars_hap0[var][0].meta]),
         )
 
     vcfvars_hap1 = {}
@@ -372,7 +376,9 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             het=True,  # default to het but check later
             duplicate=False,  # initialize but check later
             total_windows=int(np.mean([v['overlapping_windows'] for v in vars_hap1[var][0].meta])),
-            total_calls=int(np.mean([int(v['supporting_prob_sum']) for v in vars_hap1[var][0].meta])),
+            total_calls=int(np.mean([int(v['alt_mean_prob']) for v in vars_hap1[var][0].meta])),
+            ref_tot_prob=np.mean([v['ref_mean_prob'] for v in vars_hap1[var][0].meta]),
+            alt_tot_prob=np.mean([v['alt_mean_prob'] for v in vars_hap1[var][0].meta]),
         )
 
     # check for homozygous vars
@@ -385,7 +391,8 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
 
         vcfvars_hap0[var].total_windows = vcfvars_hap0[var].total_windows + vcfvars_hap1[var].total_windows
         vcfvars_hap0[var].total_calls = vcfvars_hap0[var].total_calls + vcfvars_hap1[var].total_calls
-        
+        vcfvars_hap0[var].ref_tot_prob = (vcfvars_hap0[var].ref_tot_prob + vcfvars_hap1[var].ref_tot_prob) / 2
+        vcfvars_hap0[var].alt_tot_prob = (vcfvars_hap0[var].alt_tot_prob + vcfvars_hap1[var].alt_tot_prob) / 2
         vcfvars_hap1.pop(var)
 
     # combine haplotypes
@@ -479,6 +486,10 @@ def create_vcf_header(sample_name="sample", lowcov=30, cmdline=None):
                                    ('Description', 'Total number of windows overlapping variant')])
     vcfh.add_meta('INFO', items=[('ID', "TOTAL_CALLS"), ('Number', "."), ('Type', 'Integer'),
                                    ('Description', 'Total number of windows in which variant was called')])
+    vcfh.add_meta('INFO', items=[('ID', "REF_TOT_PROB"), ('Number', "."), ('Type', 'Float'),
+                                   ('Description', 'Total probability of reference allele')])
+    vcfh.add_meta('INFO', items=[('ID', "ALT_TOT_PROB"), ('Number', "."), ('Type', 'Float'),
+                                   ('Description', 'Total probability of alternate allele')])
     # write to new vcf file object
     return vcfh
 
@@ -515,10 +526,11 @@ def create_vcf_rec(var, vcf_file):
     r.samples['sample'].phased = var.phased  # note: need to set phased after setting genotype
     r.samples['sample']['DP'] = var.depth
     r.samples['sample']['PS'] = var.phase_set
-    
     # Set INFO values
     r.info['TOTAL_WINDOWS'] = var.total_windows
     r.info['TOTAL_CALLS'] = var.total_calls
+    r.info['REF_TOT_PROB'] = var.ref_tot_prob
+    r.info['ALT_TOT_PROB'] = var.alt_tot_prob
     return r
 
 

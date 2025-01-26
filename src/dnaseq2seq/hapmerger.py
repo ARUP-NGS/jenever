@@ -150,18 +150,37 @@ def merge_refmaps(maps: MultiRefMap):
     for i in range(maps.ref_min, maps.ref_max):
         counts = Counter()
         bases = maps[i]
+        refbase = maps.ref_bases()[i - maps.ref_min]
         for b in bases:
             if b is None:
                 continue
             counts[b['target']] += b['prob']
         
-        most_common_base, most_common_prob_sum = counts.most_common(1)[0]
-        merged_haplotype.append(most_common_base)
+        sorted_base_probs = counts.most_common(3)
+        ref_prob = 0.0
+        alt_prob = 0.0
+        alt_base = None
+        for base, prob in sorted_base_probs:
+            if base == refbase:
+                ref_prob = prob
+            else:
+                alt_prob = prob
+                alt_base = base
+            if ref_prob is not None and alt_prob is not None:
+                break
+
+        prob_sum = ref_prob + alt_prob
+        if alt_prob / prob_sum > 0.5:
+            merged_haplotype.append(alt_base)
+        else:
+            merged_haplotype.append(refbase)
         meta.append({
             "overlapping_windows": len([b for b in bases if b is not None]),
             "total_bases": len(bases),
+            "ref_mean_prob": ref_prob / prob_sum,
+            "alt_mean_prob": alt_prob / prob_sum,
             "total_prob": sum(b['prob'] for b in bases if b is not None),
-            "supporting_prob_sum": most_common_prob_sum,
+            "supporting_prob_sum": alt_prob,
         })
     
     merged_hap_seq = []
@@ -194,7 +213,7 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array, int]], ref_
 
     refmaps = []
     for i, (hapseq, probs, ref_offset) in enumerate(haplotypes):
-        seq_offset = max(0, ref_offset - ref_start - 10)
+        seq_offset = max(0, ref_offset - ref_start)
         ssw = StripedSmithWaterman(ref_seq[seq_offset:seq_offset+len(hapseq) + 10],
                             gap_open_penalty=5,
                             gap_extend_penalty=0.1,
@@ -206,10 +225,10 @@ def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array, int]], ref_
 
     refmaps = MultiRefMap(refmaps)
 
-    # refbase = refmaps.ref_bases()
-    # for i in range(refmaps.ref_min, refmaps.ref_max):
-    #     d = " ".join(fmt(r['target']) if r else "  N   " for r in refmaps[i])
-    #     print(f"{i}\t{i+ref_start :5}\t{refbase[i - refmaps.ref_min]}\t{d}")
+    refbase = refmaps.ref_bases()
+    for i in range(refmaps.ref_min, refmaps.ref_max):
+        d = " ".join(fmt(r['target']) if r else "  N   " for r in refmaps[i])
+        print(f"{i}\t{i+ref_start :5}\t{refbase[i - refmaps.ref_min]}\t{d}")
 
     merged, merge_info = merge_refmaps(refmaps)
     return merged, merge_info
