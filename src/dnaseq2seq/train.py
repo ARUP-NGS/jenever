@@ -81,9 +81,10 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     samples_seen = 0
     loss_sum = 0
     model.train()
-    scaler = GradScaler(enabled=enable_amp)
+    scaler = torch.amp.GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
+    device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
     for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
@@ -94,7 +95,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         optimizer.zero_grad()
         logger.debug("Forward pass...")
 
-        with amp.autocast(enabled=enable_amp): # dtype is bfloat16 by default
+        with torch.amp.autocast(device_type, enabled=enable_amp): # dtype is bfloat16 by default
             seq_preds = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
@@ -333,9 +334,8 @@ def load_model(modelconf, ckpt):
     
     model_tot_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     encoder_tot_params = sum(p.numel() for p in model.encoder.parameters() if p.requires_grad)
-    decoder_tot_params = 2 * sum(p.numel() for p in model.decoder0.parameters() if p.requires_grad)
+    decoder_tot_params = 2 * sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
     
-    logger.info(f"Decoder0: {model.decoder0}")
     logger.info(f"Creating model with {model_tot_params} trainable params")
     logger.info(f"Encoder tot params: {encoder_tot_params} ")
     logger.info(f"Decoder tot params: {decoder_tot_params} ")
@@ -348,8 +348,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
@@ -368,10 +368,10 @@ def train_epochs(model,
                  optimizer,
                  epochs,
                  dataloader,
+                 val_loader,
                  scheduler,
                  checkpoint_freq=0,
                  model_dest=None,
-                 val_dir=None,
                  batch_size=64,
                  xtra_checkpoint_items={},
                  samples_per_epoch=10000,
@@ -389,16 +389,6 @@ def train_epochs(model,
             "mean_var_count", "ppa_dels", "ppa_ins", "ppa_snv",
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
     ])
-
-
-    if val_dir:
-        logger.info(f"Using validation data in {val_dir}")
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=val_dir, max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
-    else:
-        logger.info(f"No val. dir. provided retaining a few training samples for validation")
-        valpaths = dataloader.retain_val_samples(fraction=0.05)
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=None, pathpairs=valpaths, threads=4, tgt_prefix="tgkmers")
-        logger.info(f"Pulled {len(valpaths)} samples to use for validation")
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
@@ -608,6 +598,7 @@ def train(output_model, **kwargs):
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
 
+    val_loader = loader.PregenLoader(device=DEVICE, datadir=kwargs.get('val_dir'), max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
@@ -644,10 +635,10 @@ def train(output_model, **kwargs):
                  optimizer,
                  kwargs.get('epochs'),
                  dataloader,
+                 val_loader,
                  scheduler=scheduler,
                  model_dest=output_model,
                  checkpoint_freq=kwargs.get('checkpoint_freq', 10),
-                 val_dir=kwargs.get('val_dir'),
                  batch_size=kwargs.get("batch_size"),
                  samples_per_epoch=kwargs.get('samples_per_epoch'),
                  xtra_checkpoint_items=kwargs['model'],

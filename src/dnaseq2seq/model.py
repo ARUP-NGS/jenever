@@ -101,6 +101,51 @@ class PositionalEncoding(nn.Module):
             x = x + self.pe[0:x.size(0), :, :]
         return self.dropout(x)
 
+class CrossTalkDecodersBlock(nn.Module):
+
+    def __init__(self, decoder_embed_dim, kmer_dim, attn_heads, d_ff, p_dropout=0.1, n_decoder_layers=4):
+        super().__init__()
+        self.decoder_embed_dim = decoder_embed_dim
+        self.kmer_dim = kmer_dim
+        self.p_dropout = p_dropout
+        self.attn_heads = attn_heads
+        self.d_ff = d_ff
+        decoder_layers = nn.TransformerDecoderLayer(
+            d_model=self.decoder_embed_dim,
+            nhead=self.attn_heads,
+            dim_feedforward=self.d_ff,
+            dropout=self.p_dropout,
+            batch_first=True,
+            activation='gelu')
+        self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
+        self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
+
+    def forward(self, mem0, mem1, tgt, tgt_mask, tgt_key_padding_mask=None):
+        h0 = self.decoder0(tgt[:, 0, :, :], mem0, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+        h1 = self.decoder1(tgt[:, 1, :, :], mem1, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+        return h0, h1
+
+
+class CrossTalkDecoders(nn.Module):
+    def __init__(self, decoder_embed_dim, kmer_dim, attn_heads, d_ff, n_decoder_layers_per_block=4, p_dropout=0.1, n_blocks=2):
+        super().__init__()
+        self.decoder_embed_dim = decoder_embed_dim
+        self.kmer_dim = kmer_dim
+        self.p_dropout = p_dropout
+        self.attn_heads = attn_heads
+        self.d_ff = d_ff
+        self.n_blocks = n_blocks
+        self.n_decoder_layers_per_block = n_decoder_layers_per_block
+        self.decoders = nn.ModuleList([
+            CrossTalkDecodersBlock(decoder_embed_dim, kmer_dim, attn_heads, d_ff, p_dropout, n_decoder_layers_per_block) for _ in range(self.n_blocks)
+            ])
+
+    def forward(self, mem0, mem1, tgt, tgt_mask, tgt_key_padding_mask=None):
+        for decoder in self.decoders:
+            mem0, mem1 = decoder(mem1, mem0, tgt, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+
+        return mem0, mem1
+
 
 class VarTransformer(nn.Module):
 
@@ -142,17 +187,22 @@ class VarTransformer(nn.Module):
             activation='gelu')
         self.encoder = nn.TransformerEncoder(encoder_layers, num_layers=n_encoder_layers)
 
-        decoder_layers = nn.TransformerDecoderLayer(
-            d_model=self.decoder_embed_dim,
-            nhead=decoder_attention_heads,
-            dim_feedforward=d_ff,
-            dropout=p_dropout,
-            batch_first=True,
-            activation='gelu')
-
+        # decoder_layers = nn.TransformerDecoderLayer(
+        #     d_model=self.decoder_embed_dim,
+        #     nhead=decoder_attention_heads,
+        #     dim_feedforward=d_ff,
+        #     dropout=p_dropout,
+        #     batch_first=True,
+        #     activation='gelu')
+        n_decoder_layers_per_block = 4
+        n_blocks = 2
+        self.decoder = CrossTalkDecoders(self.decoder_embed_dim, self.kmer_dim, decoder_attention_heads, d_ff, 
+                                    n_decoder_layers_per_block=n_decoder_layers_per_block,
+                                    p_dropout=p_dropout,
+                                    n_blocks=n_blocks)
         self.tgt_input_converter = nn.Linear(self.kmer_dim, self.decoder_embed_dim)
-        self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
-        self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
+        # self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
+        # self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
         self.decode_output_converter0 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
         self.decode_output_converter1 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
 
@@ -173,20 +223,20 @@ class VarTransformer(nn.Module):
     def decode(self, mem, tgt, tgt_mask, tgt_key_padding_mask=None):
         mem_proj = self.converter(mem)
 
-        tgt0 = self.tgt_pos_encoder(tgt[:, 0, :, :])
-        tgt1 = self.tgt_pos_encoder(tgt[:, 1, :, :])
+        tgt0 = self.tgt_pos_encoder(tgt[:, 0:1, :, :])
+        tgt1 = self.tgt_pos_encoder(tgt[:, 1:, :, :])
 
-        # Convert to decoder embedding (model dimension) size
-        tgt0 = self.tgt_input_converter(tgt0)
-        tgt1 = self.tgt_input_converter(tgt1)
+        # Convert to decoder embedding (model dimension) size and concatenate
+        tgt = torch.cat(
+            (self.tgt_input_converter(tgt0), self.tgt_input_converter(tgt1)),
+            dim=1)
 
         # The magic of DataParallel mistakenly modifies the first dimension of the tgt mask when running on multi-GPU setups
         # This hack just forces it to be a square again
         if tgt_mask.shape[0] != tgt_mask.shape[1]:
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_mask.shape[1]).to(self.device)
             #logger.info(f"Forcing tgt mask shapre to be {tgt_mask.shape}, input enc shape is: {mem.shape}")
-        h0 = self.decoder0(tgt0, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
-        h1 = self.decoder1(tgt1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+        h0, h1 = self.decoder(mem_proj, mem_proj, tgt, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
 
         h0 = self.decode_output_converter0(h0)
         h1 = self.decode_output_converter1(h1)
