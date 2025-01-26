@@ -367,7 +367,7 @@ def find_regions(regionq, inputbed, bampath, refpath, n_signals, show_progress, 
                 (chrom, idx, window_start, window_end),
                 bamfile=bampath,
                 reference_fasta=refpath,
-                maxdist=100,
+                maxdist=150,
             )
             sus_regions = util.merge_overlapping_regions(sus_regions)
             if progbar is not None:
@@ -1157,7 +1157,7 @@ class WindowResult:
             print(g.hap0[0:20] + "..." + "\t" + ", ".join(str(v) for v in g.vars_hap0))
             print(g.hap1[0:20] + "..." + "\t" + ", ".join(str(v) for v in g.vars_hap1))
 
-    def merge_haplotypes(self, refpath: str, bampath: str, vcf_template: pysam.VariantFile, region_buffer: int = 20):
+    def merge_haplotypes(self, refpath: str, bampath: str, vcf_template: pysam.VariantFile, region_buffer: int = 10):
         """
         Merge the haplotypes into a single string
         :param region_buffer: Number of bases to extend the region of interest in both upstream and downstream directions. This is because sometimes detected variants actually end up aligning outside the region of interest, and I think we still want to report them
