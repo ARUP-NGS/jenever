@@ -62,8 +62,8 @@ def compute_twohap_loss(preds, tgt, criterion):
     with torch.no_grad():
         swaps = 0
         for b in range(preds.shape[0]):
-            loss1 = torch.tensor(0.0)
-            loss2 = torch.tensor(0.0)
+            loss1 = torch.tensor(0.0, device=DEVICE)
+            loss2 = torch.tensor(0.0, device=DEVICE)
             # TODO: A shortcut here would be to compare both tgt haplotypes (the true haplotypes) and see if they're equal,
             # if so, then loss1 and loss2 will be the same, and there's no need to compute anything or swap
             for t in range(preds.shape[2]):
@@ -76,7 +76,7 @@ def compute_twohap_loss(preds, tgt, criterion):
                 preds[b, :, :, :, :] = preds[b, torch.tensor([1, 0]), :, :, :]
                 swaps += 1
 
-    final_loss_sum = torch.tensor(0.0)
+    final_loss_sum = torch.tensor(0.0, device=DEVICE)
     for t in range(preds.shape[2]):
         final_loss_sum += criterion(preds[:, :, t, t:, :].flatten(start_dim=0, end_dim=2), tgt[:, :, t:].flatten())
     return final_loss_sum, swaps
@@ -609,7 +609,10 @@ def train(output_model, **kwargs):
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
 
-    val_loader = loader.PregenLoader(device=DEVICE, datadir=kwargs.get('val_dir'), max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
+    val_loader = loader.TruncateDepthLoader(
+            loader.PregenLoader(device=DEVICE, datadir=kwargs.get('val_dir'), max_decomped_batches=4, threads=8, tgt_prefix="tgkmers"),
+            model_unwrapped.read_depth
+            )
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
