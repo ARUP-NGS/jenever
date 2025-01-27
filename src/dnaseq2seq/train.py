@@ -57,20 +57,29 @@ def compute_twohap_loss(preds, tgt, criterion):
     then swap haplotypes (dimension index 1) in the predictions if that leads to a lower loss
     Finally, re-compute loss with the new configuration for all samples and return it, storing gradients this time
     """
-    # Compute losses in both configurations, and use the best
+    # Compute losses in both configurations, and use the best, preds has shape [batch, haplotype (2), predicted tokens, sequence, features]
+    # So the element [5, 0, 0, :, :] 
     with torch.no_grad():
         swaps = 0
         for b in range(preds.shape[0]):
-            loss1 = criterion(preds[b, :, :, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, :, :].flatten())
-            loss2 = criterion(preds[b, :, :, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, torch.tensor([1, 0]), :].flatten())
+            loss1 = torch.tensor(0.0)
+            loss2 = torch.tensor(0.0)
+            # TODO: A shortcut here would be to compare both tgt haplotypes (the true haplotypes) and see if they're equal,
+            # if so, then loss1 and loss2 will be the same, and there's no need to compute anything or swap
+            for t in range(preds.shape[2]):
+                loss1 += criterion(preds[b, :, t, t:, :].flatten(start_dim=0, end_dim=1),
+                              tgt[b, :, t:].flatten())
+                loss2 += criterion(preds[b, :, t, t:, :].flatten(start_dim=0, end_dim=1),
+                              tgt[b, torch.tensor([1, 0]), t:].flatten())
 
             if loss2.mean() < loss1.mean():
-                preds[b, :, :, :] = preds[b, torch.tensor([1, 0]), :]
+                preds[b, :, :, :, :] = preds[b, torch.tensor([1, 0]), :, :, :]
                 swaps += 1
 
-    return criterion(preds.flatten(start_dim=0, end_dim=2), tgt.flatten()), swaps
+    final_loss_sum = torch.tensor(0.0)
+    for t in range(preds.shape[2]):
+        final_loss_sum += criterion(preds[:, :, t, t:, :].flatten(start_dim=0, end_dim=2), tgt[:, :, t:].flatten())
+    return final_loss_sum, swaps
 
 
 
@@ -81,9 +90,10 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     samples_seen = 0
     loss_sum = 0
     model.train()
-    scaler = GradScaler(enabled=enable_amp)
+    scaler = torch.amp.GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
+    device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
     for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
@@ -94,8 +104,9 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         optimizer.zero_grad()
         logger.debug("Forward pass...")
 
-        with amp.autocast(enabled=enable_amp): # dtype is bfloat16 by default
+        with torch.amp.autocast(device_type, enabled=enable_amp): # dtype is bfloat16 by default
             seq_preds = model(src, tgt_kmers_input, tgt_mask)
+
 
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
@@ -348,8 +359,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
@@ -368,10 +379,10 @@ def train_epochs(model,
                  optimizer,
                  epochs,
                  dataloader,
+                 val_loader,
                  scheduler,
                  checkpoint_freq=0,
                  model_dest=None,
-                 val_dir=None,
                  batch_size=64,
                  xtra_checkpoint_items={},
                  samples_per_epoch=10000,
@@ -389,16 +400,6 @@ def train_epochs(model,
             "mean_var_count", "ppa_dels", "ppa_ins", "ppa_snv",
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
     ])
-
-
-    if val_dir:
-        logger.info(f"Using validation data in {val_dir}")
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=val_dir, max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
-    else:
-        logger.info(f"No val. dir. provided retaining a few training samples for validation")
-        valpaths = dataloader.retain_val_samples(fraction=0.05)
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=None, pathpairs=valpaths, threads=4, tgt_prefix="tgkmers")
-        logger.info(f"Pulled {len(valpaths)} samples to use for validation")
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
@@ -608,6 +609,7 @@ def train(output_model, **kwargs):
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
 
+    val_loader = loader.PregenLoader(device=DEVICE, datadir=kwargs.get('val_dir'), max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
@@ -644,10 +646,10 @@ def train(output_model, **kwargs):
                  optimizer,
                  kwargs.get('epochs'),
                  dataloader,
+                 val_loader,
                  scheduler=scheduler,
                  model_dest=output_model,
                  checkpoint_freq=kwargs.get('checkpoint_freq', 10),
-                 val_dir=kwargs.get('val_dir'),
                  batch_size=kwargs.get("batch_size"),
                  samples_per_epoch=kwargs.get('samples_per_epoch'),
                  xtra_checkpoint_items=kwargs['model'],
