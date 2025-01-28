@@ -58,7 +58,8 @@ def compute_twohap_loss(preds, tgt, criterion):
     Finally, re-compute loss with the new configuration for all samples and return it, storing gradients this time
     """
     # Compute losses in both configurations, and use the best, preds has shape [batch, haplotype (2), predicted tokens, sequence, features]
-    # So the element [5, 0, 0, :, :] 
+    # So the element [5, 0, 0, :, :]
+    seq_len = preds.shape[3]
     with torch.no_grad():
         swaps = 0
         for b in range(preds.shape[0]):
@@ -67,10 +68,10 @@ def compute_twohap_loss(preds, tgt, criterion):
             # TODO: A shortcut here would be to compare both tgt haplotypes (the true haplotypes) and see if they're equal,
             # if so, then loss1 and loss2 will be the same, and there's no need to compute anything or swap
             for t in range(preds.shape[2]):
-                loss1 += criterion(preds[b, :, t, t:, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, :, t:].flatten())
-                loss2 += criterion(preds[b, :, t, t:, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, torch.tensor([1, 0]), t:].flatten())
+                loss1 += criterion(preds[b, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=1),
+                              tgt[b, :, t:seq_len].flatten())
+                loss2 += criterion(preds[b, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=1),
+                              tgt[b, torch.tensor([1, 0]), t:seq_len].flatten())
 
             if loss2.mean() < loss1.mean():
                 preds[b, :, :, :, :] = preds[b, torch.tensor([1, 0]), :, :, :]
@@ -78,7 +79,7 @@ def compute_twohap_loss(preds, tgt, criterion):
 
     final_loss_sum = torch.tensor(0.0, device=DEVICE)
     for t in range(preds.shape[2]):
-        final_loss_sum += criterion(preds[:, :, t, t:, :].flatten(start_dim=0, end_dim=2), tgt[:, :, t:].flatten())
+        final_loss_sum += criterion(preds[:, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=2), tgt[:, :, t:seq_len].flatten())
     return final_loss_sum, swaps
 
 

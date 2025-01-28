@@ -27,9 +27,24 @@ from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
 
+LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s'
+
+class CustomFormatter(logging.Formatter):
+    def format(self, record):
+        if record.levelno == logging.ERROR:
+            self._style._fmt = '[%(asctime)s] %(process)d  %(name)s  %(levelname)s  %(message)s (line: %(lineno)d)'
+        else:
+            self._style._fmt = LOG_FORMAT
+        return super().format(record)
+    
+handler = logging.StreamHandler()
+handler.setFormatter(CustomFormatter(LOG_FORMAT))
 
 logger = logging.getLogger(__name__)
+logger.handlers = []
 
+logger.addHandler(handler)
+logger.setLevel(getattr(logging, os.environ.get('JV_LOGLEVEL', 'INFO').upper(), logging.INFO))
 
 DEVICE = torch.device("cuda") if hasattr(torch, 'cuda') and torch.cuda.is_available() else torch.device("cpu")
 
@@ -140,7 +155,7 @@ def load_model(model_path):
     model.to(DEVICE)
     
     model = torch.compile(model, fullgraph=True)
-    return model
+    return model, modelconf
 
 
 def cluster_positions_for_window(window, bamfile, reference_fasta, maxdist=100):
@@ -211,9 +226,6 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
         logger.info("No classifier model provided, emitting uncalibrated qualities only. Specificity will be poor")
     else:
         assert Path(classifier_path).is_file(), f"Classifier model {classifier_path} isn't a regular file"
-
-    # Verify model loading, we just want to fail fast here if there's an issue
-    load_model(model_path)
 
     call_vars_in_parallel(
         bampath=bam,
@@ -288,6 +300,10 @@ def call_vars_in_parallel(
     bed_chrom_order = util.unique_chroms(bed)
     priority_func = partial(region_priority, chrom_order=bed_chrom_order)
     progress_tracker = util.RegionProgressCounter(bed)
+    
+    # Verify model loading, we just want to fail fast here if there's an issue
+    _, modelconf = load_model(model_path)
+
 
     with mp.Manager() as manager:
         callstate = manager.dict()
@@ -300,7 +316,7 @@ def call_vars_in_parallel(
         region_finder.start()
 
         region_workers = [mp.Process(target=worker_wrapper,
-                                     args=(generate_tensors, callstate, regions_queue, tensors_queue, bampath, refpath, callstate))
+                                     args=(generate_tensors, callstate, regions_queue, tensors_queue, bampath, refpath, callstate, modelconf['max_read_depth']))
                           for _ in range(threads)]
 
         for p in region_workers:
@@ -531,7 +547,7 @@ def accumulate_regions_and_call(modelpath: str,
     """
 
     torch.set_num_threads(8)
-    model = load_model(modelpath)
+    model, _ = load_model(modelpath)
     model.eval()
     if classifier_path:
         classifier = buildclf.load_model(classifier_path)
