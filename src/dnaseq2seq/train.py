@@ -81,7 +81,7 @@ def compute_twohap_loss(preds, tgt, criterion):
     # for t in range(preds.shape[2]):
     #     final_loss_sum += criterion(preds[:, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=2), tgt[:, :, t:seq_len].flatten())
 
-    final_loss_sum = criterion(preds[:, :, t, :, :].flatten(start_dim=0, end_dim=2), tgt[:, :, :].flatten())    
+    final_loss_sum = criterion(preds[:, :, :, :].flatten(start_dim=0, end_dim=2), tgt[:, :, :].flatten())    
     return final_loss_sum, swaps
 
 

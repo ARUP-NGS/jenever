@@ -425,7 +425,7 @@ def predict_sequence(src, model, n_output_toks, device, head=0):
         # TODO: Big question here about how to use information from all the different heads 
         # We could average them for a particular token, or we could use all heads and predict multiple tokens (faster, but maybe less accurate?)
         new_preds = model.decode(mem, predictions, tgt_mask=tgt_mask)
-        new_preds = new_preds[:, :, head, -1:, :] # Just take output from first prediction head
+        new_preds = new_preds[:, :, -1:, :] # Just take output from first prediction head
         new_probs, tophit = torch.max(new_preds, dim=-1)
         p = torch.nn.functional.one_hot(tophit, num_classes=FEATURE_DIM)
         predictions = torch.concat((predictions, p), dim=2)
