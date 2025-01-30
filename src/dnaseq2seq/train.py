@@ -67,12 +67,16 @@ def compute_twohap_loss(preds, tgt, criterion):
             loss2 = torch.tensor(0.0, device=DEVICE)
             # TODO: A shortcut here would be to compare both tgt haplotypes (the true haplotypes) and see if they're equal,
             # if so, then loss1 and loss2 will be the same, and there's no need to compute anything or swap
-            for t in range(preds.shape[2]):
-                loss1 += criterion(preds[b, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, :, t:seq_len].flatten())
-                loss2 += criterion(preds[b, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=1),
-                              tgt[b, torch.tensor([1, 0]), t:seq_len].flatten())
-
+            # for t in range(preds.shape[2]):
+            #     loss1 += criterion(preds[b, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=1),
+            #                   tgt[b, :, t:seq_len].flatten())
+            #     loss2 += criterion(preds[b, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=1),
+            #                   tgt[b, torch.tensor([1, 0]), t:seq_len].flatten())
+            
+            loss1 += criterion(preds[b, :, 0:seq_len, :].flatten(start_dim=0, end_dim=1),
+                            tgt[b, :, 0:seq_len].flatten())
+            loss2 += criterion(preds[b, :, 0:seq_len, :].flatten(start_dim=0, end_dim=1),
+                            tgt[b, torch.tensor([1, 0]), 0:seq_len].flatten())
             if loss2.mean() < loss1.mean():
                 preds[b, :, :, :, :] = preds[b, torch.tensor([1, 0]), :, :, :]
                 swaps += 1
