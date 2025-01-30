@@ -179,8 +179,8 @@ class VarTransformer(nn.Module):
         self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
 
         n_tokens_to_predict = 1
-        self.multihead0 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
-        self.multihead1 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
+        #self.multihead0 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
+        #self.multihead1 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
 
         self.decode_output_converter0 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
         self.decode_output_converter1 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
