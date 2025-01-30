@@ -101,6 +101,7 @@ class PositionalEncoding(nn.Module):
             x = x + self.pe[0:x.size(0), :, :]
         return self.dropout(x)
 
+
 class MultitokenHead(nn.Module):
     """
     A cheap and easy way to have the decoder output multiple heads instead of concatenating them.
@@ -118,8 +119,12 @@ class MultitokenHead(nn.Module):
     def forward(self, tgt, mem, tgt_mask, tgt_key_padding_mask=None):
         head_outputs = []
         for head in self.heads:
-            head_outputs.append(head(tgt, mem, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask))
+            head_outputs.append(
+                head(tgt, mem, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+            )
+
         return torch.stack(head_outputs, dim=1)
+
 
 class VarTransformer(nn.Module):
 
@@ -173,7 +178,7 @@ class VarTransformer(nn.Module):
         self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
         self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
 
-        n_tokens_to_predict = 4
+        n_tokens_to_predict = 1
         self.multihead0 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
         self.multihead1 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
 

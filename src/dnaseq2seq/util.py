@@ -407,7 +407,7 @@ def expand_to_bases(vals, expansion_factor=TGT_KMER_SIZE):
     return list(chain(*([k]*expansion_factor for k in vals)))
 
 
-def predict_sequence(src, model, n_output_toks, device):
+def predict_sequence(src, model, n_output_toks, device, head=0):
     """
     Generate a predicted sequence with next-word prediction be repeatedly calling the model
     """
@@ -424,7 +424,8 @@ def predict_sequence(src, model, n_output_toks, device):
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(predictions.shape[-2]).to(device)
         # TODO: Big question here about how to use information from all the different heads 
         # We could average them for a particular token, or we could use all heads and predict multiple tokens (faster, but maybe less accurate?)
-        new_preds = model.decode(mem, predictions, tgt_mask=tgt_mask)[:, :, 0, -1:, :]
+        new_preds = model.decode(mem, predictions, tgt_mask=tgt_mask)
+        new_preds = new_preds[:, :, head, -1:, :] # Just take output from first prediction head
         new_probs, tophit = torch.max(new_preds, dim=-1)
         p = torch.nn.functional.one_hot(tophit, num_classes=FEATURE_DIM)
         predictions = torch.concat((predictions, p), dim=2)
