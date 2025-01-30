@@ -77,9 +77,11 @@ def compute_twohap_loss(preds, tgt, criterion):
                 preds[b, :, :, :, :] = preds[b, torch.tensor([1, 0]), :, :, :]
                 swaps += 1
 
-    final_loss_sum = torch.tensor(0.0, device=DEVICE)
-    for t in range(preds.shape[2]):
-        final_loss_sum += criterion(preds[:, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=2), tgt[:, :, t:seq_len].flatten())
+    # final_loss_sum = torch.tensor(0.0, device=DEVICE)
+    # for t in range(preds.shape[2]):
+    #     final_loss_sum += criterion(preds[:, :, t, 0:seq_len-t, :].flatten(start_dim=0, end_dim=2), tgt[:, :, t:seq_len].flatten())
+
+    final_loss_sum = criterion(preds[:, :, t, :, :].flatten(start_dim=0, end_dim=2), tgt[:, :, :].flatten())    
     return final_loss_sum, swaps
 
 
@@ -107,6 +109,8 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
 
         with torch.amp.autocast(device_type, enabled=enable_amp): # dtype is bfloat16 by default
             seq_preds = model(src, tgt_kmers_input, tgt_mask)
+            
+            # newpreds, _ = util.predict_sequence(src, model.eval(), n_output_toks=37, device=DEVICE, head=0)
 
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
@@ -239,8 +243,12 @@ def calc_val_accuracy(loader, model, criterion):
         for src, tgt_kmers, vaf, *_ in loader.iter_once(64):
             total_batches += 1
             tot_samples += src.shape[0]
-            seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
+            seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE, head=0) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
 
+            # seq_preds1, probs1 = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE, head=1)
+            # seq_preds2, probs2 = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE, head=2)
+            # seq_preds3, probs3 = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE, head=3)
+            
             #tgt_kmers = util.tgt_to_kmers(tgt[:, :, 0:truncate_seq_len]).float().to(DEVICE)
             tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)[:, :, 1:]
             j = tgt_kmer_idx.shape[-1]
@@ -405,6 +413,11 @@ def train_epochs(model,
         sample_iter = iter_indefinitely(dataloader, batch_size)
         for epoch in range(epochs):
             starttime = datetime.now()
+
+            # Dbg....
+            # calc_val_accuracy(val_loader, model, criterion)
+
+
             assert samples_per_epoch > 0, "Must have positive number of samples per epoch"
             loss = train_n_samples(model,
                               optimizer,
