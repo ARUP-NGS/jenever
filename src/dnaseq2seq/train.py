@@ -258,7 +258,7 @@ def calc_val_accuracy(loader, model, criterion):
             j = tgt_kmer_idx.shape[-1]
             seq_preds = seq_preds[:, :, 0:j, :] # tgt_kmer_idx might be a bit shorter if the sequence is truncated
 
-            loss, swaps = compute_twohap_loss(seq_preds.unsqueeze(dim=2), tgt_kmer_idx, criterion)
+            loss, swaps = compute_twohap_loss(seq_preds, tgt_kmer_idx, criterion)
             loss_tot += loss
             swap_tot += swaps
 
