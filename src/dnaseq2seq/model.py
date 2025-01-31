@@ -108,7 +108,6 @@ class MultitokenHead(nn.Module):
     """
     def __init__(self, embed_dim, heads, d_ff, p_dropout):
         super().__init__()
-        assert heads == 1, "Only one head is supported for multitoken heads"
         self.heads = nn.ModuleList([nn.TransformerDecoderLayer(
             d_model=embed_dim,
             nhead=1,
@@ -179,7 +178,7 @@ class VarTransformer(nn.Module):
         self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
         self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
 
-        n_tokens_to_predict = 1
+        n_tokens_to_predict = 4
         self.multihead0 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
         self.multihead1 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
 
@@ -219,8 +218,8 @@ class VarTransformer(nn.Module):
         h1 = self.decoder1(tgt1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
 
         # TODO: Probably need to adjust the tgt_mask? Or maybe not?
-        h0toks = self.multihead0(tgt0, h0, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
-        h1toks = self.multihead1(tgt1, h1, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
+        h0toks = self.multihead0(tgt0, h0, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+        h1toks = self.multihead1(tgt1, h1, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
 
         h0 = self.decode_output_converter0(h0toks)
         h1 = self.decode_output_converter1(h1toks)
