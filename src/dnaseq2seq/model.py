@@ -218,8 +218,8 @@ class VarTransformer(nn.Module):
         h1 = self.decoder1(tgt1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
 
         # TODO: Probably need to adjust the tgt_mask? Or maybe not?
-        h0toks = self.multihead0(tgt0, h0, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
-        h1toks = self.multihead1(tgt1, h1, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
+        h0toks = self.multihead0(h0, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
+        h1toks = self.multihead1(h1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
 
         h0 = self.decode_output_converter0(h0toks)
         h1 = self.decode_output_converter1(h1toks)
