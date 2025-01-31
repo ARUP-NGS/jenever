@@ -115,12 +115,13 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             seq_preds = model(src, tgt_kmers_input, tgt_mask)
             
             newpreds, _ = util.predict_sequence(src, model.eval(), n_output_toks=37, device=DEVICE, head=0)
-            
-            loss = 0
-            seq_len = seq_preds.shape[-2]
-            for t in range(seq_preds.shape[2]):
-                tloss, swaps = compute_twohap_loss(seq_preds[:, :, t, 0:seq_len-t, :], tgt_expected[:, :, t:seq_len], criterion)
-                loss += tloss
+
+            loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+            # loss = 0
+            # seq_len = seq_preds.shape[-2]
+            # for t in range(seq_preds.shape[2]):
+            #     tloss, swaps = compute_twohap_loss(seq_preds[:, :, t, 0:seq_len-t, :], tgt_expected[:, :, t:seq_len], criterion)
+            #     loss += tloss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
