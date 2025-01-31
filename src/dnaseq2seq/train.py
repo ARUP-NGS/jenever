@@ -59,7 +59,7 @@ def compute_twohap_loss(preds, tgt, criterion):
     """
     # Compute losses in both configurations, and use the best, preds has shape [batch, haplotype (2), predicted tokens, sequence, features]
     # So the element [5, 0, 0, :, :]
-    seq_len = preds.shape[3]
+    seq_len = preds.shape[-2]
     with torch.no_grad():
         swaps = 0
         for b in range(preds.shape[0]):
@@ -78,7 +78,7 @@ def compute_twohap_loss(preds, tgt, criterion):
             loss2 += criterion(preds[b, :, 0:seq_len, :].flatten(start_dim=0, end_dim=1),
                             tgt[b, torch.tensor([1, 0]), 0:seq_len].flatten())
             if loss2.mean() < loss1.mean():
-                preds[b, :, :, :, :] = preds[b, torch.tensor([1, 0]), :, :, :]
+                preds[b, :, :, :] = preds[b, torch.tensor([1, 0]), :, :]
                 swaps += 1
 
     # final_loss_sum = torch.tensor(0.0, device=DEVICE)
