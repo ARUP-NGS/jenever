@@ -110,7 +110,7 @@ class MultitokenHead(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([nn.TransformerDecoderLayer(
             d_model=embed_dim,
-            nhead=1,
+            nhead=4,
             dim_feedforward=d_ff,
             dropout=p_dropout,
             batch_first=True,
@@ -139,6 +139,7 @@ class VarTransformer(nn.Module):
                  n_encoder_layers,
                  n_decoder_layers,
                  decoder_embed_dim,
+                 n_tokens_to_predict,
                  p_dropout=0.1,
                  device='cpu'):
         super().__init__()
@@ -178,7 +179,6 @@ class VarTransformer(nn.Module):
         self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
         self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
 
-        n_tokens_to_predict = 1
         self.multihead0 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
         self.multihead1 = MultitokenHead(self.decoder_embed_dim, n_tokens_to_predict, d_ff, p_dropout)
 
@@ -218,8 +218,8 @@ class VarTransformer(nn.Module):
         h1 = self.decoder1(tgt1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
 
         # TODO: Probably need to adjust the tgt_mask? Or maybe not?
-        h0toks = self.multihead0(h0, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
-        h1toks = self.multihead1(h1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)[:, 0, :, :]
+        h0toks = self.multihead0(h0, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
+        h1toks = self.multihead1(h1, mem_proj, tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
 
         h0 = self.decode_output_converter0(h0toks)
         h1 = self.decode_output_converter1(h1toks)
