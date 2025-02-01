@@ -114,7 +114,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         with torch.amp.autocast(device_type, enabled=enable_amp): # dtype is bfloat16 by default
             seq_preds = model(src, tgt_kmers_input, tgt_mask)
             
-            newpreds, _ = util.predict_sequence(src, model.eval(), n_output_toks=37, device=DEVICE, head=0)
+            #newpreds, _ = util.predict_sequence(src, model.eval(), n_output_toks=37, device=DEVICE, head=0)
 
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
             # loss = 0
