@@ -527,6 +527,9 @@ class SortedVariantWriter:
         for v in items:
             self.put(v)
     
+    def __len__(self):
+        return sum(len(v) for k,v in self.buffer.items())
+
     def flush(self):
         if self.chrom_order is None:
             self.chrom_order = sorted(self.buffer.keys(), key=default_chrom_sort_key)

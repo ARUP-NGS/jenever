@@ -148,6 +148,7 @@ def load_model(model_path):
                            encoder_attention_heads=modelconf['encoder_attention_heads'],
                            decoder_attention_heads=modelconf['decoder_attention_heads'],
                            d_ff=modelconf['dim_feedforward'],
+                           n_tokens_to_predict=4,
                            device=DEVICE)
 
     model.load_state_dict(statedict, strict=False)
