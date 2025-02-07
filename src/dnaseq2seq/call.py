@@ -1074,8 +1074,8 @@ class GenotypePrediction:
     def aln_vars(self, reference: pysam.FastaFile):
         """ Align the haplotypes to the reference genome to create Variant objects """
         refseq = reference.fetch(self.region[0], self.region[1], self.region[2])
-        vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, self.hap0, self.region[0], self.region[1], probs=self.probs0) if self.region[1] <= v.pos <= self.region[2])
-        vars_hap1 = list(v for v in vcf.aln_to_vars(refseq, self.hap1, self.region[0], self.region[1], probs=self.probs1) if self.region[1] <= v.pos <= self.region[2])
+        vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, self.hap0, self.region[0], self.region[1], baseinfo=self.probs0) if self.region[1] <= v.pos <= self.region[2])
+        vars_hap1 = list(v for v in vcf.aln_to_vars(refseq, self.hap1, self.region[0], self.region[1], baseinfo=self.probs1) if self.region[1] <= v.pos <= self.region[2])
         for v in vars_hap0:
             v.tnpred = self.tn_prob
         for v in vars_hap1:
@@ -1183,19 +1183,18 @@ class WindowResult:
         h0_haps = [(g.hap0, g.probs0, g.offset) for g in self.genotype_predictions]
         h1_haps = [(g.hap1, g.probs1, g.offset) for g in self.genotype_predictions]
         try:
-            h0_merged, h0_merge_info = hapmerger.align_and_merge_haplotypes(h0_haps, refseq, ref_start=start)
+            h0_merged, h0_merge_info = hapmerger.align_and_merge_haplotypes_v2(h0_haps, refseq, roi=self.region, ref_start=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap0: {ex}")
             #logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
 
         try:
-            h1_merged, h1_merge_info = hapmerger.align_and_merge_haplotypes(h1_haps, refseq, ref_start=start)
+            h1_merged, h1_merge_info = hapmerger.align_and_merge_haplotypes_v2(h1_haps, refseq, roi=self.region, ref_start=start)
         except Exception as ex:
             logger.error(f"Exception merging haplotypes for hap1: {ex}")
             #logger.error(f"window is: {self.print_genotype_predictions()}")
             raise ex
-
 
         # Then, align the merged haplotype to the reference genome and pluck out variants from there
         hap0_vars = vcf.aln_to_vars(refseq, h0_merged, self.region[0], start, h0_merge_info)

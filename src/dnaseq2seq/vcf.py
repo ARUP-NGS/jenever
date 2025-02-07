@@ -209,20 +209,21 @@ def _display_aln(aln):
             raise ValueError(f"Unknown cigar op {cig.op}")
 
 
-def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
+def aln_to_vars(refseq, altseq, chrom, offset=0, baseinfo=None):
     """
     Smith-Watterman align the given sequences and return a generator over Variant objects
     that describe differences between the sequences
     :param refseq: String of bases representing reference sequence
     :param altseq: String of bases representing alt sequence
     :param offset: This amount will be added to each variant position
+    :param baseinfo: List of dicts, one for each ref base, each containing 'prob' and 'supporting_prob_sum'
     :return: Generator over variants
     """
     num_vars = 0
-    if probs is not None:
-        assert len(probs) == len(altseq), f"Probabilities must contain same number of elements as alt sequence"
+    if baseinfo is not None:
+        assert len(baseinfo) == len(altseq), f"Probabilities must contain same number of elements as alt sequence"
     else:
-        probs = np.ones(len(altseq))
+        baseinfo = np.ones(len(altseq))
     aln = align_sequences(altseq, refseq, gap_open_penalty=4, gap_extend_penalty=0.2, match_score=1, mismatch_score=-1)
     ref_seq_consumed = 0
     q_offset = 0
@@ -244,7 +245,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
                         chrom,
                         offset + t_offset,
                         t_offset,
-                        probs[q_offset:q_offset+cig.len]
+                        baseinfo[q_offset:q_offset+cig.len]
             ):
                 v.var_index = num_vars
                 variants.append(v)
@@ -260,7 +261,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
                         ref='',
                         alt=altseq[q_offset:q_offset+cig.len],
                         pos=offset + variant_pos_offset + aln.target_begin,
-                        meta=probs[q_offset:q_offset+cig.len],
+                        meta=baseinfo[q_offset:q_offset+cig.len],
                         window_offset=variant_pos_offset,
                         var_index=num_vars)
                 )
@@ -274,7 +275,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
                         ref=refseq[t_offset:t_offset + cig.len],
                         alt='',
                         pos=offset + t_offset,
-                        meta=probs[q_offset:q_offset+cig.len],
+                        meta=baseinfo[q_offset:q_offset+cig.len],
                         window_offset=t_offset,
                         var_index=num_vars)
                 )

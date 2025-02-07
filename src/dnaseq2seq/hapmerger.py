@@ -205,7 +205,51 @@ def fmt(s):
         return s.ljust(5)
 
 
-def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array, int]], ref_seq: str, ref_start: int):
+def geometric_mean_with_logs(data):
+
+  if np.any(data <= 0):
+      return np.nan  # Geometric mean undefined for non-positive numbers
+
+  log_data = np.log(data)
+  mean_log_data = np.mean(log_data)
+  geometric_mean = np.exp(mean_log_data)
+
+  return geometric_mean
+
+
+def align_and_merge_haplotypes_v2(haplotypes: List[Tuple[str, np.array, int]], ref_seq: str, ref_start: int, roi: Tuple[int, int]):
+    """
+    Merge the overlapping haplotypes into a single sequence
+    This version just picks the single haplotype that has the highest geometric mean probability across the region of interest
+    """
+    
+    roi_start, roi_end = int(roi[1]), int(roi[2])
+    best = []
+    for i, (hapseq, probs, ref_offset) in enumerate(haplotypes):
+        s = hapseq[roi_start - ref_offset:roi_end - ref_offset]
+        p = probs[roi_start - ref_offset:roi_end - ref_offset]
+        geomean_p = geometric_mean_with_logs(p)
+        best.append((hapseq, geomean_p))
+
+    # Sort the best by geomean_p
+    best.sort(key=lambda x: x[1], reverse=True)
+
+    bestseq = best[0][0]
+    metainfo = []
+    for i, b in enumerate(bestseq):
+        metainfo.append({
+            "overlapping_windows": 1,
+            "total_bases": 1,
+            "ref_mean_prob": 1.0,
+            "alt_mean_prob": 1.0,
+            "total_prob": 1.0,
+            "supporting_prob_sum": 1.0,
+        })
+
+    return bestseq, metainfo
+
+
+def align_and_merge_haplotypes(haplotypes: List[Tuple[str, np.array, int]], ref_seq: str, ref_start: int, roi: Tuple[int, int]):
     """
     Merge the overlapping haplotypes into a single sequence
     The algorithm here is to align each haplotype to the reference sequence and then merge the aligned haplotypes
