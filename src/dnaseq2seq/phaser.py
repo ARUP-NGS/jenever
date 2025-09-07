@@ -1,6 +1,7 @@
 
 from itertools import product, permutations
-from skbio.alignment import StripedSmithWaterman
+from skbio.alignment import pair_align
+from skbio.sequence import DNA
 import logging
 import pysam
 from intervaltree import IntervalTree
@@ -272,8 +273,9 @@ def score_genotypes(aln, ref_sequence, region_start, variants):
         0 for gt in genotypes
         for _ in range(len(gt.haplotypes))
     ]
-    ssws = [
-        [StripedSmithWaterman(hap.seq) for hap in gts.haplotypes]
+    # Convert haplotype sequences to DNA objects for alignment
+    hap_dnas = [
+        [DNA(hap.seq) for hap in gts.haplotypes]
         for gts in genotypes
     ]
 
@@ -295,9 +297,21 @@ def score_genotypes(aln, ref_sequence, region_start, variants):
             continue
 
         # readscores is a list of the alignment score for every haplotype across all genotypes
-        readscores = [hap_ssw(read.seq).optimal_alignment_score
-                      for gt_scores, genotype_aligners in zip(read_support, ssws)
-                      for hap_ssw in genotype_aligners]
+        read_dna = DNA(read.seq)
+        readscores = []
+        for gt_scores, genotype_dnas in zip(read_support, hap_dnas):
+            for hap_dna in genotype_dnas:
+                try:
+                    alignment_result = pair_align(
+                        read_dna, hap_dna,
+                        sub_score=(2.0, -3.0),  # (match_score, mismatch_score)
+                        gap_cost=5.0  # gap penalty
+                    )
+                    readscores.append(alignment_result.score)
+                except Exception as e:
+                    # If alignment fails, use a default low score
+                    logger.debug(f"Alignment failed for read {read.qname}: {e}")
+                    readscores.append(-1000)
 
         maxscore = max(readscores)
         best_indices = [i for i, score in enumerate(readscores) if score == maxscore]

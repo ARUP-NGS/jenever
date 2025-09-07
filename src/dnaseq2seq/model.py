@@ -102,6 +102,132 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
+class SwiGLU(nn.Module):
+    """
+    SwiGLU feed-forward block:
+      x -> [Linear_a, Linear_b] -> SiLU(a) * b -> Dropout -> Linear_out
+    Default hidden size keeps params ~constant vs. standard FFN:
+      hidden = int(2/3 * dim_feedforward)
+    """
+    def __init__(
+        self,
+        in_features: int,
+        dim_feedforward: int,
+        dropout: float = 0.0,
+        out_features: int | None = None,
+        layer_norm_eps: float = 1e-5,
+        init_xavier: bool = True,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden = int(2 * dim_feedforward / 3)
+
+        self.linear_a = nn.Linear(in_features, hidden)
+        self.linear_b = nn.Linear(in_features, hidden)
+        self.dropout = nn.Dropout(dropout)
+        self.linear_out = nn.Linear(hidden, out_features)
+
+        if init_xavier:
+            for m in (self.linear_a, self.linear_b, self.linear_out):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        a = self.linear_a(x)
+        b = self.linear_b(x)
+        x = F.silu(a) * b
+        x = self.dropout(x)
+        return self.linear_out(x)
+
+class TransformerEncoderLayerSwiGLU(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        layer_norm_eps: float = 1e-5,
+        batch_first: bool = False,
+        norm_first: bool = False,
+    ):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=batch_first)
+        self.dropout_sa = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+
+        self.ff = SwiGLU(d_model, dim_feedforward, dropout=dropout, out_features=d_model)
+        self.dropout_ff = nn.Dropout(dropout)
+        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+
+        self.norm_first = norm_first
+
+    def _sa(self, x, attn_mask, key_padding_mask, is_causal):
+        y, _ = self.self_attn(x, x, x, attn_mask=attn_mask, key_padding_mask=key_padding_mask, is_causal=is_causal)
+        return self.dropout_sa(y)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        x = src
+        if self.norm_first:
+            x = x + self._sa(self.norm1(x), src_mask, src_key_padding_mask, is_causal)
+            x = x + self.dropout_ff(self.ff(self.norm2(x)))
+        else:
+            x = self.norm1(x + self._sa(x, src_mask, src_key_padding_mask, is_causal))
+            x = self.norm2(x + self.dropout_ff(self.ff(x)))
+        return x
+
+
+class TransformerDecoderLayerSwiGLU(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        nhead: int,
+        dim_feedforward: int = 2048,
+        dropout: float = 0.1,
+        layer_norm_eps: float = 1e-5,
+        batch_first: bool = False,
+        norm_first: bool = False,
+    ):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=batch_first)
+        self.cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=batch_first)
+
+        self.drop1 = nn.Dropout(dropout)
+        self.drop2 = nn.Dropout(dropout)
+        self.drop3 = nn.Dropout(dropout)
+
+        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+        self.norm3 = nn.LayerNorm(d_model, eps=layer_norm_eps)
+
+        self.ff = SwiGLU(d_model, dim_feedforward, dropout=dropout, out_features=d_model)
+        self.norm_first = norm_first
+
+    def _sa(self, x, attn_mask, key_padding_mask, is_causal):
+        y, _ = self.self_attn(x, x, x, attn_mask=attn_mask, key_padding_mask=key_padding_mask, is_causal=is_causal)
+        return self.drop1(y)
+
+    def _ca(self, x, mem, attn_mask, key_padding_mask):
+        y, _ = self.cross_attn(x, mem, mem, attn_mask=attn_mask, key_padding_mask=key_padding_mask)
+        return self.drop2(y)
+
+    def forward(
+        self, tgt, memory, tgt_mask=None, memory_mask=None,
+        tgt_key_padding_mask=None, memory_key_padding_mask=None,
+        is_causal=False
+    ):
+        x = tgt
+        if self.norm_first:
+            x = x + self._sa(self.norm1(x), tgt_mask, tgt_key_padding_mask, is_causal)
+            x = x + self._ca(self.norm2(x), memory, memory_mask, memory_key_padding_mask)
+            x = x + self.drop3(self.ff(self.norm3(x)))
+        else:
+            x = self.norm1(x + self._sa(x, tgt_mask, tgt_key_padding_mask, is_causal))
+            x = self.norm2(x + self._ca(x, memory, memory_mask, memory_key_padding_mask))
+            x = self.norm3(x + self.drop3(self.ff(x)))
+        return x
+
+
 class VarTransformer(nn.Module):
 
     def __init__(self,
@@ -133,22 +259,20 @@ class VarTransformer(nn.Module):
         self.pos_encoder = PositionalEncoding2D(self.fc1_hidden, self.device)
         self.tgt_pos_encoder = PositionalEncoding(self.kmer_dim, batch_first=True, max_len=500).to(self.device)
         logger.info(f"tgt pos encoder: {self.tgt_pos_encoder.pe.shape}, embed dim: {self.decoder_embed_dim}")
-        encoder_layers = nn.TransformerEncoderLayer(
+        encoder_layers = TransformerEncoderLayerSwiGLU(
             d_model=self.embed_dim,
             nhead=encoder_attention_heads,
             dim_feedforward=d_ff,
             dropout=p_dropout,
-            batch_first=True,
-            activation='gelu')
+            batch_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layers, num_layers=n_encoder_layers)
 
-        decoder_layers = nn.TransformerDecoderLayer(
+        decoder_layers = TransformerDecoderLayerSwiGLU(
             d_model=self.decoder_embed_dim,
             nhead=decoder_attention_heads,
             dim_feedforward=d_ff,
             dropout=p_dropout,
-            batch_first=True,
-            activation='gelu')
+            batch_first=True)
 
         self.tgt_input_converter = nn.Linear(self.kmer_dim, self.decoder_embed_dim)
         self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)

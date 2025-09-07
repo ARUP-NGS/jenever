@@ -16,9 +16,9 @@ def tinybam():
 
 
 def test_mismatches_to_vars():
-    query =  "AAAAAAAA"
-    target = "TAACGAAC"
-    mm = list(vcf._mismatches_to_vars(query, target, cig_offset=17, probs=[1] * len(query), chrom='X', window_offset=0))
+    refseq =  "AAAAAAAA"
+    altseq = "TAACGAAC"
+    mm = list(vcf._mismatches_to_vars(refseq, altseq, cig_offset=17, probs=[1] * len(refseq), chrom='X', window_offset=0))
     assert len(mm) == 3
     assert mm[0].ref == "A"
     assert mm[0].alt == "T"
@@ -32,16 +32,22 @@ def test_mismatches_to_vars():
 
 
 def test_aln_to_vars_ignore_delstart():
-    q = "ACTGACTGACTG"
-    t =   "TGACTGACTG"
-    v = list(vcf.aln_to_vars(q, t, 'X'))
+    refseq = "ACTGACTGACTG"
+    altseq =   "TGACTGACTG"
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X', strip_leading_indels=False))
+    assert len(v) == 1
+    assert v[0].ref == 'AC'
+    assert v[0].alt == ''
+    assert v[0].pos == 0
+
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X', strip_leading_indels=True))
     assert len(v) == 0
 
 
 def test_aln_to_varsinternal_del():
-    q = "ACTGACTGACTG"
-    t = "ACTGA--GACTG".replace("-", "")
-    v = list(vcf.aln_to_vars(q, t, 'X'))
+    refseq = "ACTGACTGACTG"
+    altseq = "ACTGA--GACTG".replace("-", "")
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
     assert len(v) == 1
     v = v[0]
     assert v.ref == 'CT'
@@ -50,27 +56,66 @@ def test_aln_to_varsinternal_del():
 
 
 def test_aln_to_varsinternal_delins():
-    q = "CCCCACTGACTGACTGAAAA"
-    t = "CCCCACTGAGGGGACTGAAAA".replace("-", "")
-    v = list(vcf.aln_to_vars(q, t, 'X'))
+    refseq = "CCCCACTGA-CTG--ACTGAAAA".replace("-", "")
+    altseq = "CCCCACTGA-GGGG-ACTGAAAA".replace("-", "")
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
     assert len(v) == 2
-    assert v[0].ref == ''
-    assert v[0].alt == 'G'
-    assert v[0].pos == 9
-    assert v[1].ref == 'CT'
-    assert v[1].alt == 'GG'
-    assert v[1].pos == 9
+    assert v[0].ref == 'CT'
+    assert v[0].alt == 'GG'
+    assert v[0].pos == 9 
+    assert v[1].ref == ''
+    assert v[1].alt == 'G'
+    assert v[1].pos == 10 # Comes back at position 12 which is technically correct but not left-aligned, which might cause issues
+    
 
 
 def test_aln_to_vars_offset_del():
-    q = "ACTGACTGACTGACGACGT"
-    t = "---GACTG-CTGACGACGT".replace("-", "")
-    v = list(vcf.aln_to_vars(q, t, 'X'))
+    refseq = "ACTGACTGACTGACGACGT"
+    altseq = "---GACTG-CTGACGACGT".replace("-", "")
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
     assert len(v) == 1
     assert v[0].ref == 'A'
     assert v[0].alt == ''
     assert v[0].pos == 8
 
+def test_leftalign_indel():
+    refseq = "ACTGACACACACACTTCGGTG"
+    altseq = "ACTGACA--CACACTTCGGTG".replace("-", "")
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
+    assert len(v) == 1
+    assert v[0].ref == 'AC'
+    assert v[0].alt == ''
+    assert v[0].pos == 4
+
+    # It doesn't matter if we delete an AC or a CA, the result haplotype will be the same
+    refseq = "ACTGACACACACACTTCGGTG"
+    altseq = "ACTGAC--ACACACTTCGGTG".replace("-", "")
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
+    assert len(v) == 1
+    assert v[0].ref == 'AC'
+    assert v[0].alt == ''
+    assert v[0].pos == 4
+
+        # It doesn't matter if we delete an AC or a CA, the result haplotype will be the same
+    refseq = "ACTGACACACACACTTCGGTG"
+    altseq = "ACTGA--CACACACTTCGGTG".replace("-", "")
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
+    assert len(v) == 1
+    assert v[0].ref == 'AC'
+    assert v[0].alt == ''
+    assert v[0].pos == 4
+
+def test_leftalign_across_snv():
+    refseq = "ACTGACACACACACACTTCGGTG"
+    altseq = "ACTGACTCA--CACACTTCGGTG".replace("-", "")
+    v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
+    assert len(v) == 2
+    assert v[0].ref == 'A'
+    assert v[0].alt == 'T'
+    assert v[0].pos == 6   
+    assert v[1].ref == 'AC'
+    assert v[1].alt == ''
+    assert v[1].pos == 8   
 
 def test_multi_snv_ins():
     refseq = "GGTGACTGATAAC----TGACTGACACTG".replace("-", "")
@@ -82,20 +127,50 @@ def test_multi_snv_ins():
     assert v[0].pos == 16
     assert v[0].window_offset == 6
 
-    assert v[1].ref == ''
-    assert v[1].alt == 'AGTT'
+    assert v[1].ref == 'T'
+    assert v[1].alt == 'A'
     assert v[1].pos == 23
     assert v[1].window_offset == 13
 
-    assert v[2].ref == 'G'
-    assert v[2].alt == 'T'
-    assert v[2].pos == 24
-    assert v[2].window_offset == 14
+    assert v[2].ref == ''
+    assert v[2].alt == 'TTTT'
+    assert v[2].pos == 25
+    assert v[2].window_offset == 15
 
     assert v[3].ref == 'G'
     assert v[3].alt == 'C'
     assert v[3].pos == 28
     assert v[3].window_offset == 18
+
+def test_leftalign():
+    refseq = "ACTGACACACACACTTCGGTG"
+    # Deletion
+    v = vcf.Variant(chrom='X', pos=8, ref='AC', alt='', qual=1.0, window_offset=0, var_index=0)
+    v = vcf.leftalign_indel(refseq, v)
+    assert v.pos == 4
+    assert v.ref == 'AC'
+
+    # Insertion
+    v = vcf.Variant(chrom='X', pos=10, ref='', alt='AC', qual=1.0, window_offset=0, var_index=0)
+    v = vcf.leftalign_indel(refseq, v)
+    assert v.pos == 4
+    assert v.alt == 'AC'
+
+    # Homopolymer
+    refseq = "AAAAAAACACACACTTCGGTG"
+    v = vcf.Variant(chrom='X', pos=6, ref='A', alt='', qual=1.0, window_offset=0, var_index=0)
+    v = vcf.leftalign_indel(refseq, v)
+    assert v.pos == 0
+    assert v.ref == 'A'
+
+    v = vcf.Variant(chrom='X', pos=6, ref='', alt='A', qual=1.0, window_offset=0, var_index=0)
+    v = vcf.leftalign_indel(refseq, v)
+    assert v.pos == 0
+    assert v.alt == 'A'
+
+
+
+
 
 
 def test_agg_variants(tinybam):

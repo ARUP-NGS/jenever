@@ -4,7 +4,10 @@ from dataclasses import dataclass
 import logging
 import pysam
 
-from skbio.alignment import StripedSmithWaterman
+# from skbio.alignment import StripedSmithWaterman
+from skbio.alignment import pair_align, PairAlignPath
+from skbio.sequence import DNA
+
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -114,16 +117,39 @@ def _geomean(probs):
 
 def align_sequences(query, target, gap_open_penalty=3, gap_extend_penalty=1, match_score=2, mismatch_score=-1):
     """
-    Return Smith-Watterman alignment of both sequences
+    Return Smith-Waterman alignment of both sequences
+    See https://scikit.bio/docs/dev/generated/skbio.alignment.PairAlignPath.html#skbio.alignment.PairAlignPath for more details on result
     """
     # TODO SSW in skbio is deprecated (see https://github.com/scikit-bio/scikit-bio/issues/1814)
-    ssw = StripedSmithWaterman(query,
-                               gap_open_penalty=gap_open_penalty,
-                               gap_extend_penalty=gap_extend_penalty,
-                               match_score=match_score,
-                               mismatch_score=mismatch_score)
-    return ssw(target)
+    # ssw = StripedSmithWaterman(query,
+    #                            gap_open_penalty=gap_open_penalty,
+    #                            gap_extend_penalty=gap_extend_penalty,
+    #                            match_score=match_score,
+    #                            mismatch_score=mismatch_score)
+    result = pair_align(query, target,
+                        mode='global',
+                        gap_cost=(gap_open_penalty, gap_extend_penalty),
+                        sub_score=(match_score, mismatch_score),
+                        )
+    return result
 
+
+def leftalign_indel(refseq: str, var: Variant, min_pos: int = 0, var_offset: int = 0):
+    """
+    Left align an indel variant by adjusting the position
+    Note that this MODIFIES IN PLACE
+    :param min_pos: Minimum position to left align to
+    :param var_offset: Offset to add to the variant position
+    returns the variant
+    """
+    assert len(var.ref) == 0 or len(var.alt) == 0
+    var_pos = var.pos + var_offset
+    bases = var.ref if len(var.ref) > 0 else var.alt
+    varlen = len(var.ref) if len(var.ref) > 0 else len(var.alt)
+    while var_pos > min_pos and refseq[var_pos - varlen:var_pos] == bases:
+        var_pos -= varlen
+    var.pos = var_pos
+    return var
 
 def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
     """
@@ -132,6 +158,8 @@ def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
     This is for finding variants that are inside an "Match" region according to the cigar from an alignment result
     :returns: Generator over Variants from the paired sequences
     """
+    if query == target:
+        return
     mismatches = []
     mismatch_quals = []
     mismatchstart = None
@@ -167,14 +195,14 @@ def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
                       window_offset=mismatchstart - cig_offset + window_offset)
 
 
-def _display_aln(aln):
+def _display_aln(query, target, path):
     """
     Utility function for printing an alignment
     """
-    qit = iter(aln.query_sequence)
-    tit = iter(aln.target_sequence)
+    qit = iter(query)
+    tit = iter(target)
     tbases = 0
-    for cig in _cigtups(aln.cigar):
+    for cig in _cigtups(path.to_cigar()):
         if cig.op == "M":
             for _ in range(cig.len):
                 q = next(qit)
@@ -199,13 +227,14 @@ def _display_aln(aln):
             raise ValueError(f"Unknown cigar op {cig.op}")
 
 
-def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
+def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None, strip_leading_indels=True):
     """
-    Smith-Watterman align the given sequences and return a generator over Variant objects
+    Smith-Waterman align the given sequences and return a generator over Variant objects
     that describe differences between the sequences
     :param refseq: String of bases representing reference sequence
     :param altseq: String of bases representing alt sequence
     :param offset: This amount will be added to each variant position
+    :param strip_leading_indels: If True, remove any indel variants at the beginning of the sequence
     :return: Generator over variants
     """
     num_vars = 0
@@ -213,68 +242,79 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
         assert len(probs) == len(altseq), f"Probabilities must contain same number of elements as alt sequence"
     else:
         probs = np.ones(len(altseq))
-    aln = align_sequences(altseq, refseq, gap_open_penalty=4, gap_extend_penalty=0.2, match_score=1, mismatch_score=-1)
-    ref_seq_consumed = 0
-    q_offset = 0
-    t_offset = 0
+    aln = align_sequences(refseq, altseq, gap_open_penalty=4, gap_extend_penalty=0.2, match_score=1, mismatch_score=-1)
+    path = aln.paths[0]
+
+    # _display_aln(refseq, altseq, path)
+
+    alt_offset = 0 
+    ref_offset = 0
+    target_begin = ref_offset
+    ref_seq_consumed = ref_offset
 
     variant_pos_offset = 0
-    if aln.query_begin > 0:
-        q_offset += aln.query_begin # Maybe we don't want this? query is alt sequence, so nonzero indicates first alt base matches downstream of first ref base
-    if aln.target_begin > 0:
-        ref_seq_consumed += aln.target_begin
-        t_offset += aln.target_begin
 
     variants = []
-    for cig in _cigtups(aln.cigar):
+    for cig in _cigtups(path.to_cigar()):
         if cig.op == "M":
             for v in _mismatches_to_vars(
-                        refseq[t_offset:t_offset+cig.len],
-                        altseq[q_offset:q_offset+cig.len],
+                        refseq[ref_offset:ref_offset+cig.len],
+                        altseq[alt_offset:alt_offset+cig.len],
                         chrom,
-                        offset + t_offset,
-                        t_offset,
-                        probs[q_offset:q_offset+cig.len]
+                        offset + ref_offset,
+                        ref_offset,
+                        probs[alt_offset:alt_offset+cig.len]
             ):
                 v.var_index = num_vars
                 variants.append(v)
                 num_vars += 1
-            q_offset += cig.len
+            alt_offset += cig.len
             variant_pos_offset += cig.len
-            t_offset += cig.len
+            ref_offset += cig.len
 
         elif cig.op == "I":
             variants.append(
                 Variant(
                         chrom=chrom,
                         ref='',
-                        alt=altseq[q_offset:q_offset+cig.len],
-                        pos=offset + variant_pos_offset + aln.target_begin,
-                        qual=_geomean(probs[q_offset:q_offset+cig.len]),
+                        alt=altseq[alt_offset:alt_offset+cig.len],
+                        pos=offset + variant_pos_offset + target_begin,
+                        qual=_geomean(probs[alt_offset:alt_offset+cig.len]),
                         window_offset=variant_pos_offset,
                         var_index=num_vars)
                 )
             num_vars += 1
-            q_offset += cig.len
+            alt_offset += cig.len
             # variant_pos_offset += cig.len
 
         elif cig.op == "D":
             variants.append(
                 Variant(chrom=chrom,
-                        ref=refseq[t_offset:t_offset + cig.len],
+                        ref=refseq[ref_offset:ref_offset + cig.len],
                         alt='',
-                        pos=offset + t_offset,
-                        qual=_geomean(probs[q_offset-1:q_offset+cig.len]),
-                        window_offset=t_offset,
+                        pos=offset + ref_offset,
+                        qual=_geomean(probs[alt_offset-1:alt_offset+cig.len]),
+                        window_offset=ref_offset,
                         var_index=num_vars)
                 )
             num_vars += 1
-            t_offset += cig.len
+            ref_offset += cig.len
             variant_pos_offset += cig.len
 
     for v in variants:
-        v.aln_score = aln.optimal_alignment_score
+        v.aln_score = aln.score
         v.var_count = len(variants)
+
+    variants = sorted(variants, key=lambda x: x.pos)
+    min_pos = offset
+    for v in variants:
+        if len(v.ref) == 0 or len(v.alt) == 0:
+            v = leftalign_indel(altseq, v, min_pos)
+        min_pos = v.pos + 1
+    
+    if strip_leading_indels and variants:
+        if (len(variants[0].ref) == 0 or len(variants[0].alt) == 0) and variants[0].pos == offset:
+            variants = variants[1:]
 
     return variants
 
