@@ -140,7 +140,7 @@ def load_model(model_path):
     model.to(DEVICE)
     
     model = torch.compile(model, fullgraph=True)
-    return model
+    return model, modelconf
 
 
 def cluster_positions_for_window(window, bamfile, reference_fasta, maxdist=100):
@@ -213,7 +213,7 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
         assert Path(classifier_path).is_file(), f"Classifier model {classifier_path} isn't a regular file"
 
     # Verify model loading, we just want to fail fast here if there's an issue
-    load_model(model_path)
+    _, modelconf = load_model(model_path)
 
     call_vars_in_parallel(
         bampath=bam,
@@ -222,6 +222,7 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
         model_path=model_path,
         classifier_path=classifier_path,
         threads=threads,
+        max_read_depth=modelconf['max_read_depth'],
         max_batch_size=max_batch_size,
         vcf_out=vcf_out,
         vcf_header_extras=vcf_header_extras,
@@ -264,7 +265,7 @@ def worker_wrapper(func, callstate, *args, **kwargs):
 
 
 def call_vars_in_parallel(
-    bampath, bed, refpath, model_path, classifier_path, threads, max_batch_size, vcf_out, vcf_header_extras, show_progress,
+    bampath, bed, refpath, model_path, classifier_path, threads, max_read_depth, max_batch_size, vcf_out, vcf_header_extras, show_progress,
 ):
     """
     Call variants in asynchronous fashion. There are three types of Processes that communicate via two mp.Queues
@@ -300,7 +301,7 @@ def call_vars_in_parallel(
         region_finder.start()
 
         region_workers = [mp.Process(target=worker_wrapper,
-                                     args=(generate_tensors, callstate, regions_queue, tensors_queue, bampath, refpath, callstate))
+                                     args=(generate_tensors, callstate, regions_queue, tensors_queue, bampath, refpath, callstate, max_read_depth))
                           for _ in range(threads)]
 
         for p in region_workers:
@@ -531,7 +532,7 @@ def accumulate_regions_and_call(modelpath: str,
     """
 
     torch.set_num_threads(8)
-    model = load_model(modelpath)
+    model, modelconf = load_model(modelpath)
     model.eval()
     if classifier_path:
         classifier = buildclf.load_model(classifier_path)

@@ -513,7 +513,10 @@ class SortedVariantWriter:
         """
         self.outputfh = outputfh
         self.chrom_order = chrom_order
-        self.buffer = collections.defaultdict(list) 
+        self.buffer = collections.defaultdict(list)
+    
+    def __len__(self):
+        return sum(len(v) for v in self.buffer.values())
 
     def put(self, v):
         if self.chrom_order is not None and v.chrom not in self.chrom_order:
