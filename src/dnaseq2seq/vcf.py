@@ -146,14 +146,14 @@ def left_align(ref_seq: str, var: Variant, min_pos: int = 0, var_offset: int = 0
     alt = var.alt
     pos = var.pos - var_offset
     min_pos = min_pos - var_offset
-    # Substitutions or complex replacements: nothing to do
+    # Skip substitutions or complex replacements
     if len(ref) == len(alt):
         return var
 
     # Validate deletion matches reference (safe-guard; skip shift if not)
     if ref and not alt:
         if ref_seq[pos:pos+len(ref)] != ref:
-            return var  # not matching; bail out
+            return var  # ref seq doesn't match ref allele
 
         # Rotate the deleted motif left while the preceding base matches the last base of the motif
         while pos > min_pos and ref and ref_seq[pos - 1] == ref[-1]:
@@ -165,7 +165,7 @@ def left_align(ref_seq: str, var: Variant, min_pos: int = 0, var_offset: int = 0
         var.alt = alt
         return var
 
-    # Insertion case: ref == "" and alt != ""
+    # Insertion
     if alt and not ref:
         # Rotate the inserted motif left while the preceding base matches the last base of the insertion
         while pos > min_pos and alt and ref_seq[pos - 1] == alt[-1]:
