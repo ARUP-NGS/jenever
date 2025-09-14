@@ -258,7 +258,7 @@ class VarTransformer(nn.Module):
         self.converter = nn.Linear(self.embed_dim, self.decoder_embed_dim)
         self.pos_encoder = PositionalEncoding2D(self.fc1_hidden, self.device)
         self.tgt_pos_encoder = PositionalEncoding(self.kmer_dim, batch_first=True, max_len=500).to(self.device)
-        logger.info(f"tgt pos encoder: {self.tgt_pos_encoder.pe.shape}, embed dim: {self.decoder_embed_dim}")
+        logger.debug(f"tgt pos encoder: {self.tgt_pos_encoder.pe.shape}, embed dim: {self.decoder_embed_dim}")
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=self.embed_dim,
             nhead=encoder_attention_heads,

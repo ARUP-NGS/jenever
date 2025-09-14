@@ -134,22 +134,54 @@ def align_sequences(query, target, gap_open_penalty=3, gap_extend_penalty=1, mat
     return result
 
 
-def leftalign_indel(refseq: str, var: Variant, min_pos: int = 0, var_offset: int = 0):
+def left_align(ref_seq: str, var: Variant, min_pos: int = 0, var_offset: int = 0) -> Variant:
     """
-    Left align an indel variant by adjusting the position
+    Left-align a variant
     Note that this MODIFIES IN PLACE
-    :param min_pos: Minimum position to left align to
-    :param var_offset: Offset to add to the variant position
-    returns the variant
+    
+    This has no effect on substitutions or complex replacements (len(ref) == len(alt) > 0)
+    
+    Returns: Modified variant
     """
-    assert len(var.ref) == 0 or len(var.alt) == 0
-    var_pos = var.pos + var_offset
-    bases = var.ref if len(var.ref) > 0 else var.alt
-    varlen = len(var.ref) if len(var.ref) > 0 else len(var.alt)
-    while var_pos > min_pos and refseq[var_pos - varlen:var_pos] == bases:
-        var_pos -= varlen
-    var.pos = var_pos
+    ref = var.ref
+    alt = var.alt
+    pos = var.pos - var_offset
+    min_pos = min_pos - var_offset
+    # Substitutions or complex replacements: nothing to do
+    if len(ref) == len(alt):
+        return var
+
+    # Validate deletion matches reference (safe-guard; skip shift if not)
+    if ref and not alt:
+        if ref_seq[pos:pos+len(ref)] != ref:
+            return var  # not matching; bail out
+
+        # Rotate the deleted motif left while the preceding base matches the last base of the motif
+        while pos > min_pos and ref and ref_seq[pos - 1] == ref[-1]:
+            # Move last char of ref to front (cyclic rotation) and shift position left
+            ref = ref[-1] + ref[:-1]
+            pos -= 1
+        var.pos = pos + var_offset
+        var.ref = ref
+        var.alt = alt
+        return var
+
+    # Insertion case: ref == "" and alt != ""
+    if alt and not ref:
+        # Rotate the inserted motif left while the preceding base matches the last base of the insertion
+        while pos > min_pos and alt and ref_seq[pos - 1] == alt[-1]:
+            # Move last char of alt to front (cyclic rotation) and shift position left
+            alt = alt[-1] + alt[:-1]
+            pos -= 1
+        var.pos = pos + var_offset
+        var.ref = ref
+        var.alt = alt
+        return var
+
+    # If we ever see a mixed-length change with both non-empty (shouldn't happen in minimal form), leave as-is
     return var
+
+
 
 def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
     """
@@ -195,33 +227,40 @@ def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
                       window_offset=mismatchstart - cig_offset + window_offset)
 
 
-def _display_aln(query, target, path):
+def _display_aln(target, query, path, position_offset=0):
     """
     Utility function for printing an alignment
     """
+
+    def safe_next(it):
+        try:
+            return next(it)
+        except StopIteration:
+            return "."
+
     qit = iter(query)
     tit = iter(target)
-    tbases = 0
+    tbases = position_offset
     for cig in _cigtups(path.to_cigar()):
         if cig.op == "M":
             for _ in range(cig.len):
-                q = next(qit)
-                t = next(tit)
+                q = safe_next(qit)
+                t = safe_next(tit)
                 if q == t:
-                    print(f"{tbases}\tM   {q} = {t}")
+                    print(f"{tbases :8}\tM   {q} = {t}")
                 else:
-                    print(f"{tbases}\tM   {q} ! {t}")
+                    print(f"{tbases :8}\tM   {q} ! {t}")
                 tbases += 1
         elif cig.op == "I":
             for _ in range(cig.len):
-                q = next(qit)
+                q = safe_next(qit)
                 t = "-"
-                print(f"{tbases}\tI  {q}   {t}")
+                print(f"{tbases :8}\tI  {q}   {t}")
         elif cig.op == "D":
             for _ in range(cig.len):
                 q = "-"
-                t = next(tit)
-                print(f"{tbases}   D  {q}   {t}")
+                t = safe_next(tit)
+                print(f"{tbases :8}\tD   {q}   {t}")
                 tbases += 1
         else:
             raise ValueError(f"Unknown cigar op {cig.op}")
@@ -245,7 +284,8 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None, strip_leading_indel
     aln = align_sequences(refseq, altseq, gap_open_penalty=4, gap_extend_penalty=0.2, match_score=1, mismatch_score=-1)
     path = aln.paths[0]
 
-    # _display_aln(refseq, altseq, path)
+    # Debugging
+    _display_aln(refseq, altseq, path, position_offset=offset)
 
     alt_offset = 0 
     ref_offset = 0
@@ -309,7 +349,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None, strip_leading_indel
     min_pos = offset
     for v in variants:
         if len(v.ref) == 0 or len(v.alt) == 0:
-            v = leftalign_indel(altseq, v, min_pos)
+            v = left_align(refseq, v, min_pos, var_offset=offset)
         min_pos = v.pos + 1
     
     if strip_leading_indels and variants:

@@ -476,7 +476,7 @@ def merge_datas(datas):
     return allencoded, batch_start_pos, batch_regions
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def call_multi_paths(datas, model, refpath, bampath, classifier_model, vcf_template, max_batch_size):
     """
     Concat a list of 'datas' objects, which contain encoded_pileups, batch offsets, and then call variants over all of them

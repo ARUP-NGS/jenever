@@ -65,7 +65,7 @@ def test_aln_to_varsinternal_delins():
     assert v[0].pos == 9 
     assert v[1].ref == ''
     assert v[1].alt == 'G'
-    assert v[1].pos == 10 # Comes back at position 12 which is technically correct but not left-aligned, which might cause issues
+    assert v[1].pos == 11
     
 
 
@@ -106,6 +106,9 @@ def test_leftalign_indel():
     assert v[0].pos == 4
 
 def test_leftalign_across_snv():
+    """
+    In this case the left-alignment must stop at the SNV upstream of it
+    """
     refseq = "ACTGACACACACACACTTCGGTG"
     altseq = "ACTGACTCA--CACACTTCGGTG".replace("-", "")
     v = list(vcf.aln_to_vars(refseq, altseq, 'X'))
@@ -113,9 +116,9 @@ def test_leftalign_across_snv():
     assert v[0].ref == 'A'
     assert v[0].alt == 'T'
     assert v[0].pos == 6   
-    assert v[1].ref == 'AC'
+    assert v[1].ref == 'CA'
     assert v[1].alt == ''
-    assert v[1].pos == 8   
+    assert v[1].pos == 7   
 
 def test_multi_snv_ins():
     refseq = "GGTGACTGATAAC----TGACTGACACTG".replace("-", "")
@@ -146,31 +149,43 @@ def test_leftalign():
     refseq = "ACTGACACACACACTTCGGTG"
     # Deletion
     v = vcf.Variant(chrom='X', pos=8, ref='AC', alt='', qual=1.0, window_offset=0, var_index=0)
-    v = vcf.leftalign_indel(refseq, v)
+    v = vcf.left_align(refseq, v)
     assert v.pos == 4
     assert v.ref == 'AC'
 
     # Insertion
     v = vcf.Variant(chrom='X', pos=10, ref='', alt='AC', qual=1.0, window_offset=0, var_index=0)
-    v = vcf.leftalign_indel(refseq, v)
+    v = vcf.left_align(refseq, v)
     assert v.pos == 4
     assert v.alt == 'AC'
 
     # Homopolymer
     refseq = "AAAAAAACACACACTTCGGTG"
     v = vcf.Variant(chrom='X', pos=6, ref='A', alt='', qual=1.0, window_offset=0, var_index=0)
-    v = vcf.leftalign_indel(refseq, v)
+    v = vcf.left_align(refseq, v)
     assert v.pos == 0
     assert v.ref == 'A'
 
     v = vcf.Variant(chrom='X', pos=6, ref='', alt='A', qual=1.0, window_offset=0, var_index=0)
-    v = vcf.leftalign_indel(refseq, v)
+    v = vcf.left_align(refseq, v)
     assert v.pos == 0
     assert v.alt == 'A'
 
+    refseq = "TAATTTCTTTTGTTTAAGCTTCAGTTGTTCTTTCGTTCTCTACTTTCTCAAGGAAGAAGCTTTAGTTACTGATTTTTTACCTTCTTTTCTTATATATGAACTTAATGTTACACATTTCTTCTAAGCATTGCT"
+    altseq = "AATTTCTTTTGTTTAAGCTTCAATTGTTCTTTCGTTCTCTACTTTCTCAAGGAAGAAGCTTTAGTTACTGATTTTTTACCTTCTTTTCTTATATATGAACTTAATGTTACACATTTTCTTCTAAGCATTGCT"
+    v = vcf.Variant(chrom='X', pos=25000494, ref='', alt='T', qual=1.0, window_offset=0, var_index=0)
+    v = vcf.left_align(refseq, v, var_offset=25000377)
+    assert v.pos == 25000491
+    assert v.alt == 'T'
 
 
 
+def test_display_aln():
+    refseq = "GGTGACTGATAAC----TGACTGACACTG".replace("-", "")
+    altseq = "GGTGAC--ATAACAGTTTTACTCACACTG".replace("-", "")
+    result = vcf.align_sequences(refseq, altseq)
+    vcf._display_aln(refseq, altseq, result.paths[0])
+    print(result.paths[0].to_cigar())
 
 
 def test_agg_variants(tinybam):
