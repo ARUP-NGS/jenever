@@ -1,4 +1,3 @@
-
 import numpy as np
 from dataclasses import dataclass
 import logging
@@ -285,7 +284,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None, strip_leading_indel
     path = aln.paths[0]
 
     # Debugging
-    _display_aln(refseq, altseq, path, position_offset=offset)
+    #_display_aln(refseq, altseq, path, position_offset=offset)
 
     alt_offset = 0 
     ref_offset = 0
