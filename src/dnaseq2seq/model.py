@@ -214,15 +214,16 @@ class TransformerDecoderLayerSwiGLU(nn.Module):
     def forward(
         self, tgt, memory, tgt_mask=None, memory_mask=None,
         tgt_key_padding_mask=None, memory_key_padding_mask=None,
-        is_causal=False
+        tgt_is_causal=False,
+        memory_is_causal=False
     ):
         x = tgt
         if self.norm_first:
-            x = x + self._sa(self.norm1(x), tgt_mask, tgt_key_padding_mask, is_causal)
+            x = x + self._sa(self.norm1(x), tgt_mask, tgt_key_padding_mask, tgt_is_causal)
             x = x + self._ca(self.norm2(x), memory, memory_mask, memory_key_padding_mask)
             x = x + self.drop3(self.ff(self.norm3(x)))
         else:
-            x = self.norm1(x + self._sa(x, tgt_mask, tgt_key_padding_mask, is_causal))
+            x = self.norm1(x + self._sa(x, tgt_mask, tgt_key_padding_mask, tgt_is_causal))
             x = self.norm2(x + self._ca(x, memory, memory_mask, memory_key_padding_mask))
             x = self.norm3(x + self.drop3(self.ff(x)))
         return x
@@ -259,26 +260,26 @@ class VarTransformer(nn.Module):
         self.pos_encoder = PositionalEncoding2D(self.fc1_hidden, self.device)
         self.tgt_pos_encoder = PositionalEncoding(self.kmer_dim, batch_first=True, max_len=500).to(self.device)
         logger.debug(f"tgt pos encoder: {self.tgt_pos_encoder.pe.shape}, embed dim: {self.decoder_embed_dim}")
-        encoder_layers = nn.TransformerEncoderLayer(
+        encoder_layers = TransformerEncoderLayerSwiGLU(
             d_model=self.embed_dim,
             nhead=encoder_attention_heads,
             dim_feedforward=d_ff,
             dropout=p_dropout,
-            batch_first=True,
-            activation='gelu')
+            batch_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layers, num_layers=n_encoder_layers)
 
-        decoder_layers = nn.TransformerDecoderLayer(
+        decoder_layers = TransformerDecoderLayerSwiGLU(
             d_model=self.decoder_embed_dim,
             nhead=decoder_attention_heads,
             dim_feedforward=d_ff,
             dropout=p_dropout,
-            batch_first=True,
-            activation='gelu')
+            batch_first=True)
 
         self.tgt_input_converter = nn.Linear(self.kmer_dim, self.decoder_embed_dim)
         self.decoder0 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
         self.decoder1 = nn.TransformerDecoder(decoder_layers, num_layers=n_decoder_layers)
+
+        # Un-embedding layers
         self.decode_output_converter0 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
         self.decode_output_converter1 = nn.Linear(self.decoder_embed_dim, self.kmer_dim)
 

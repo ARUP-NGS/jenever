@@ -12,8 +12,8 @@ from pygit2 import Repository
 import torch
 from torch import nn
 import torch.distributed as dist
-from torch.cuda.amp import GradScaler
-import torch.cuda.amp as amp
+from torch.amp import GradScaler
+import torch.amp as amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
@@ -81,7 +81,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     samples_seen = 0
     loss_sum = 0
     model.train()
-    scaler = GradScaler(enabled=enable_amp)
+    scaler = GradScaler('cuda', enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
     for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
@@ -94,7 +94,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         optimizer.zero_grad()
         logger.debug("Forward pass...")
 
-        with amp.autocast(enabled=enable_amp): # dtype is bfloat16 by default
+        with amp.autocast('cuda', enabled=enable_amp): # dtype is bfloat16 by default
             seq_preds = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
@@ -368,10 +368,10 @@ def train_epochs(model,
                  optimizer,
                  epochs,
                  dataloader,
+                 val_loader,
                  scheduler,
                  checkpoint_freq=0,
                  model_dest=None,
-                 val_dir=None,
                  batch_size=64,
                  xtra_checkpoint_items={},
                  samples_per_epoch=10000,
@@ -389,16 +389,6 @@ def train_epochs(model,
             "mean_var_count", "ppa_dels", "ppa_ins", "ppa_snv",
             "ppv_dels", "ppv_ins", "ppv_snv", "learning_rate", "epochtime",
     ])
-
-
-    if val_dir:
-        logger.info(f"Using validation data in {val_dir}")
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=val_dir, max_decomped_batches=4, threads=8, tgt_prefix="tgkmers")
-    else:
-        logger.info(f"No val. dir. provided retaining a few training samples for validation")
-        valpaths = dataloader.retain_val_samples(fraction=0.05)
-        val_loader = loader.PregenLoader(device=DEVICE, datadir=None, pathpairs=valpaths, threads=4, tgt_prefix="tgkmers")
-        logger.info(f"Pulled {len(valpaths)} samples to use for validation")
 
     try:
         sample_iter = iter_indefinitely(dataloader, batch_size)
@@ -597,6 +587,12 @@ def train(output_model, **kwargs):
                                      max_decomped_batches=kwargs.get('max_decomp_batches'),
                                      tgt_prefix="tgkmers")
 
+    val_dataloader = loader.PregenLoader(DEVICE,
+                                         kwargs.get("val_dir"),
+                                         threads=kwargs.get('threads'),
+                                         max_decomped_batches=kwargs.get('max_decomp_batches'),
+                                         tgt_prefix="tgkmers")
+
     if kwargs.get('input_model'):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
     else:
@@ -607,6 +603,7 @@ def train(output_model, **kwargs):
 
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
     dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
+    val_dataloader = loader.TruncateDepthLoader(val_dataloader, model_unwrapped.read_depth)
 
 
     if kwargs.get('model_encoder_fix'):
@@ -644,10 +641,10 @@ def train(output_model, **kwargs):
                  optimizer,
                  kwargs.get('epochs'),
                  dataloader,
+                 val_dataloader,
                  scheduler=scheduler,
                  model_dest=output_model,
                  checkpoint_freq=kwargs.get('checkpoint_freq', 10),
-                 val_dir=kwargs.get('val_dir'),
                  batch_size=kwargs.get("batch_size"),
                  samples_per_epoch=kwargs.get('samples_per_epoch'),
                  xtra_checkpoint_items=kwargs['model'],
