@@ -176,7 +176,7 @@ def concat_metafile(sample_metafile, dest_metafh):
     os.unlink(sample_metafile)
 
 
-def find_files(datadir, src_prefix='src', tgt_prefix='tgt'):
+def find_files(datadir, src_prefix='src', tgt_prefix='tgt', tn_prefix='tntgt'):
     """
     Examine files in datadir and match up all src / tgt / vaftgt files and store them as tuples in a list
     :returns : List of (src, tgt, vaftgt) tuples of matched files
@@ -188,6 +188,7 @@ def find_files(datadir, src_prefix='src', tgt_prefix='tgt'):
         suffix = src.name.split("_")[-1]
         pairs.append((src,
                      f"{datadir}/{tgt_prefix}_{suffix}",
+                     f"{datadir}/{tn_prefix}_{suffix}",
                       ))
     return pairs
 

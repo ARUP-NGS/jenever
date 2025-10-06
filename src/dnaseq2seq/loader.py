@@ -176,7 +176,7 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
     of the data in parallel using 'threads' threads. Yield (src, tgt, None, None, None) values (the Nones are used
     for additional labels or debugging)
     """
-    src, tgt = [], []
+    src, tgt, tntgt = [], [], []
     for i in range(0, len(pathpairs), max_decomped):
         logger.info(f"Decompressing {i}-{i + max_decomped} files of {len(pathpairs)}")
         decomp_start = datetime.now()
@@ -185,9 +185,10 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
         decomp_end = datetime.now()
         decomp_time = (decomp_end - decomp_start).total_seconds()
 
-        for j in range(0, len(decomped), 2):
+        for j in range(0, len(decomped), 3):
             src.append(decomped[j])
             tgt.append(decomped[j + 1])
+            tntgt.append(decomped[j + 2])
 
         total_size = sum([s.shape[0] for s in src])
         if total_size < batch_size:
@@ -197,6 +198,7 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
         # Make a big tensor.
         src_t = torch.cat(src, dim=0)
         tgt_t = torch.cat(tgt, dim=0)
+        tntgt_t = torch.cat(tntgt, dim=0)
 
         nbatch = total_size // batch_size
         remain = total_size % batch_size
@@ -208,7 +210,7 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
             yield (
                 src_t[start:end].to(device).float(),
                 tgt_t[start:end].to(device).long(),
-                None,  # vaftgt_t[start:end].to(self.device),
+                tntgt_t[start:end].to(device).float(),
                 None,
                 {"decomp_time": decomp_time},
             )
@@ -218,44 +220,31 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
             # The remaining data points will be in next batch.
             src = [src_t[nbatch * batch_size:]]
             tgt = [tgt_t[nbatch * batch_size:]]
+            tntgt = [tntgt_t[nbatch * batch_size:]]
         else:
-            src, tgt = [], []
+            src, tgt, tntgt = [], [], []
 
     if len(src) > 0:
         # We need to yield the last batch.
         yield (
             torch.cat(src, dim=0).to(device).float(),
             torch.cat(tgt, dim=0).to(device).long(),
-            None,
+            torch.cat(tntgt, dim=0).to(device).float(),
             None,
             {"decomp_time": 0.0},
         )
     logger.info(f"Done iterating data")
 
-def load_files(datadir, src_prefix="src", tgt_prefix=""):
-    pathpairs = util.find_files(datadir, src_prefix, tgt_prefix)
+def load_files(datadir, src_prefix, tgt_prefix, tn_prefix):
+    pathpairs = util.find_files(datadir, src_prefix, tgt_prefix, tn_prefix)
     logger.info(f"Loaded {len(pathpairs)} from {datadir}")
     random.shuffle(pathpairs)
     return pathpairs
 
-class CurriculumLoader:
-
-    def __init__(self, device, datadirs, switchpoints, threads, max_decomped_batches=10):
-        self.device = device
-        self.datadirs = datadirs
-        self.switchpoints = switchpoints
-        self.threads = threads
-
-
-    def iter_once(self, batch_size):
-        self.load_files()  # Search for new data with every iteration ?
-        for result in iterate_dir(self.device, self.pathpairs, batch_size, self.max_decomped, self.threads):
-            yield result
-
 
 class PregenLoader:
 
-    def __init__(self, device, datadir, threads, max_decomped_batches=10, src_prefix="src", tgt_prefix="tgt", vaftgt_prefix="vaftgt", pathpairs=None):
+    def __init__(self, device, datadir, threads, max_decomped_batches=10, src_prefix="src", tgt_prefix="tgt", tn_prefix="tntgt", pathpairs=None):
         """
         Create a new loader that reads tensors from a 'pre-gen' directory
         :param device: torch.device
@@ -268,12 +257,13 @@ class PregenLoader:
         self.datadir = Path(datadir) if datadir else None
         self.src_prefix = src_prefix
         self.tgt_prefix = tgt_prefix
+        self.tn_prefix = tn_prefix
         if pathpairs and datadir:
             raise ValueError(f"Both datadir and pathpairs specified for PregenLoader - please choose just one")
         if pathpairs:
             self.pathpairs = pathpairs
         else:
-            self.pathpairs = load_files(self.datadir, self.src_prefix, self.tgt_prefix)
+            self.pathpairs = load_files(self.datadir, self.src_prefix, self.tgt_prefix, self.tn_prefix)
             
         self.threads = threads
         self.max_decomped = max_decomped_batches # Max number of decompressed items to store at once - increasing this uses more memory, but allows increased parallelization
@@ -309,7 +299,7 @@ class PregenLoader:
         sequentially
         :param batch_size: The number of samples in a minibatch.
         """
-        self.pathpairs = load_files(self.datadir, self.src_prefix, self.tgt_prefix) # Search for new data with every iteration ?
+        self.pathpairs = load_files(self.datadir, self.src_prefix, self.tgt_prefix, self.tn_prefix) # Search for new data with every iteration ?
         for result in iterate_dir(self.device, self.pathpairs, batch_size, self.max_decomped, self.threads):
             yield result
 

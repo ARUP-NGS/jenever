@@ -341,6 +341,8 @@ class VarTransformer(nn.Module):
 
     def forward(self, src, tgt, tgt_mask, tgt_key_padding_mask=None):
         mem = self.encode(src)
+        cls_result = self.cls_head(mem[:, 0, :])
         result = self.decode(mem, tgt.float(), tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
-        return result
+        
+        return result, cls_result
 

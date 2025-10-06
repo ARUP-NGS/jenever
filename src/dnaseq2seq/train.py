@@ -83,8 +83,11 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     model.train()
     scaler = GradScaler('cuda', enabled=enable_amp)
     start = time.perf_counter()
+    tn_criterion = nn.BCEWithLogitsLoss()
+    tn_loss_weight = 0.1
+
     samples_perf = 0
-    for batch, (src, tgt_kmers, tgtvaf, altmask, log_info) in enumerate(loader_iter):
+    for batch, (src, tgt_kmers, tntgt, altmask, log_info) in enumerate(loader_iter):
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -95,10 +98,13 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         logger.debug("Forward pass...")
 
         with amp.autocast('cuda', enabled=enable_amp): # dtype is bfloat16 by default
-            seq_preds = model(src, tgt_kmers_input, tgt_mask)
+            seq_preds, tn_head_preds = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
-            loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+            seq_loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+            tn_loss = tn_criterion(tn_head_preds.squeeze(-1), tntgt)
+
+            loss = seq_loss + tn_loss_weight * tn_loss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -116,7 +122,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         if batch % 10 == 0:
             elapsed = time.perf_counter() - start
             samples_per_sec = samples_perf / elapsed
-            logger.info(f"Batch {batch}  samples: {samples_seen}   loss: {loss.item():.3f}   swaps: {swaps}   samples/sec: {samples_per_sec :.2f}")
+            logger.info(f"Batch {batch}  samples: {samples_seen} seq_loss: {seq_loss.item():.3f} tn_loss: {tn_loss.item():.3f}  loss: {loss.item():.3f}   swaps: {swaps}   samples/sec: {samples_per_sec :.2f}")
             start = time.perf_counter()
             samples_perf = 0
 
@@ -348,8 +354,8 @@ def load_model(modelconf, ckpt):
     #model.fc1.requires_grad_(False)
     #model.fc2.requires_grad_(False)
     
-    logger.info("Compiling model...")
-    model = torch.compile(model)
+    # logger.info("Compiling model...")
+    # model = torch.compile(model)
     
     if USE_DDP:
         rank = dist.get_rank()
