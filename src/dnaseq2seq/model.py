@@ -243,6 +243,7 @@ class VarTransformer(nn.Module):
                  n_decoder_layers,
                  decoder_embed_dim,
                  p_dropout=0.1,
+                 cls_head_output=1,
                  device='cpu'):
         super().__init__()
 
@@ -252,7 +253,7 @@ class VarTransformer(nn.Module):
         self.decoder_embed_dim = decoder_embed_dim
         self.embed_dim = encoder_attention_heads * embed_dim_factor
         self.fc1_hidden = 12
-
+        self.cls_head_output = cls_head_output
         self.fc1 = nn.Linear(feature_count, self.fc1_hidden)
         self.fc2 = nn.Linear(self.read_depth * self.fc1_hidden, self.embed_dim)
 
@@ -286,6 +287,16 @@ class VarTransformer(nn.Module):
         self.softmax = nn.LogSoftmax(dim=-1)
         self.emb_layernorm = nn.LayerNorm(self.embed_dim)
         self.emb_dropout = nn.Dropout(p_dropout)
+        
+        # Learnable CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+        nn.init.normal_(self.cls_token, std=0.02)
+
+        self.cls_head = nn.Sequential(
+            nn.Linear(self.embed_dim, self.embed_dim //2),
+            nn.GELU(),
+            nn.Linear(self.embed_dim //2, self.cls_head_output),
+        )
 
 
     def encode(self, src):
@@ -294,6 +305,12 @@ class VarTransformer(nn.Module):
         src = src.flatten(start_dim=2)
         src = F.gelu(self.fc2(src)) # Operates on an entire alignment column
         src = self.emb_dropout(self.emb_layernorm(src))
+        
+        # Append CLS token to the beginning of the sequence
+        batch_size = src.size(0)
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)  # (batch_size, 1, embed_dim)
+        src = torch.cat([cls_tokens, src], dim=1)  # (batch_size, seq_len + 1, embed_dim)
+        
         mem = self.encoder(src)
         return mem
 
