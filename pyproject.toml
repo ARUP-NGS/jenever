@@ -12,7 +12,7 @@ authors = [
     { name = "Brendan O'Fallon", email = "brendan.ofallon@aruplab.com" }
 ]
 dependencies = [
-    "lz4",
+    "lz4>=4.3",
     "pygit2",
     "pysam>=0.22",
     "numpy>=1.26",
@@ -27,6 +27,8 @@ dependencies = [
     "ipykernel>=6.30.1",
     "comet-ml>=3.52.1",
     "lmdb>=1.4.1",
+    "humanfriendly>=10.0",
+    "msgpack>=1.1.1",
 ]
 urls = { "Homepage" = "https://github.com/ARUP-NGS/jenever" }
 
