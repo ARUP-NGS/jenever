@@ -240,7 +240,7 @@ class LMDB:
                     # Insert into database
                     txn.put(f"item:{total_items}".encode(), data)
                     total_items += 1
-                    if total_items % 100 == 0:  # Progress update every 100 items
+                    if total_items % 5000 == 0:  # Progress update every 100 items
                         logger.info(f"  Inserted {total_items} items so far...")
         
         # Wait for all processes to complete
@@ -536,13 +536,13 @@ def main():
 
 
 if __name__ == "__main__":
-    # main()
-    db = LMDB("/data2/brendan/testlmdb")
-    db.init_database()
-    for i, key in enumerate(db.iterate_keys()):
-        print(key)
-        if i > 10:
-            break
-    j = db.query_item("item:100")
-    print(j)
-    db.close()
+    main()
+    # db = LMDB("/data2/brendan/testlmdb")
+    # db.init_database()
+    # for i, key in enumerate(db.iterate_keys()):
+    #     print(key)
+    #     if i > 10:
+    #         break
+    # j = db.query_item("item:100")
+    # print(j)
+    # db.close()
