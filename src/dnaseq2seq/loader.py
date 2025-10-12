@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from concurrent.futures import ProcessPoolExecutor
 import io
 import functools
+from typing import Union, List
+from torch.utils.data import DataLoader
 
 import numpy as np
 import torch
@@ -20,6 +22,7 @@ import torch.multiprocessing as mp
 
 from dnaseq2seq import util
 from dnaseq2seq import pregen
+from dnaseq2seq.lmdbdataset import LMDBDataset
 
 class ReadLoader:
     """
@@ -207,13 +210,13 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
         for n in range(0, nbatch):
             start = n * batch_size
             end = (n + 1) * batch_size
-            yield (
-                src_t[start:end].to(device).float(),
-                tgt_t[start:end].to(device).long(),
-                tntgt_t[start:end].to(device).float(),
-                None,
-                {"decomp_time": decomp_time},
-            )
+            yield {
+                "read": src_t[start:end].to(device).float(),
+                "tgkmers": tgt_t[start:end].to(device).long(),
+                "tntgt": tntgt_t[start:end].to(device).float(),
+                "altmask": None,
+                "log_info": {"decomp_time": decomp_time},
+            }
             decomp_time = 0.0
 
         if remain:
@@ -226,13 +229,13 @@ def iterate_dir(device, pathpairs, batch_size, max_decomped, threads):
 
     if len(src) > 0:
         # We need to yield the last batch.
-        yield (
-            torch.cat(src, dim=0).to(device).float(),
-            torch.cat(tgt, dim=0).to(device).long(),
-            torch.cat(tntgt, dim=0).to(device).float(),
-            None,
-            {"decomp_time": 0.0},
-        )
+        yield {
+            "read": torch.cat(src, dim=0).to(device).float(),
+            "tgkmers": torch.cat(tgt, dim=0).to(device).long(),
+            "tntgt": torch.cat(tntgt, dim=0).to(device).float(),
+            "altmask": None,
+            "log_info": {"decomp_time": 0.0},
+        }
     logger.info(f"Done iterating data")
 
 def load_files(datadir, src_prefix, tgt_prefix, tn_prefix):
@@ -244,7 +247,7 @@ def load_files(datadir, src_prefix, tgt_prefix, tn_prefix):
 
 class PregenLoader:
 
-    def __init__(self, device, datadir, threads, max_decomped_batches=10, src_prefix="src", tgt_prefix="tgt", tn_prefix="tntgt", pathpairs=None):
+    def __init__(self, device, datadir, threads, batch_size, max_decomped_batches=10, src_prefix="src", tgt_prefix="tgt", tn_prefix="tntgt", pathpairs=None):
         """
         Create a new loader that reads tensors from a 'pre-gen' directory
         :param device: torch.device
@@ -258,6 +261,7 @@ class PregenLoader:
         self.src_prefix = src_prefix
         self.tgt_prefix = tgt_prefix
         self.tn_prefix = tn_prefix
+        self.batch_size = batch_size
         if pathpairs and datadir:
             raise ValueError(f"Both datadir and pathpairs specified for PregenLoader - please choose just one")
         if pathpairs:
@@ -291,7 +295,24 @@ class PregenLoader:
         logger.info(f"Number of batches left for training: {len(self.pathpairs)}")
         return val_samples
 
-    def iter_once(self, batch_size):
+    def __len__(self):
+        """
+        Return the number of batches available in this loader
+        """
+        return len(self.pathpairs)
+
+
+    def __iter__(self):
+        """
+        Make this loader a standard Python iterable by yielding items from iter_once
+        Uses a default batch_size of 1 for iteration
+        """
+        # Use a reasonable default batch size for iteration
+        # This could be made configurable if needed
+        for result in self.iter_once(self.batch_size):
+            yield result
+
+    def iter_once(self, batch_size=None):
         """
         Make one pass over the training data, in this case all of the files in the 'data dir'
         Training data is compressed and on disk, which makes it slow. To increase performance we
@@ -299,6 +320,8 @@ class PregenLoader:
         sequentially
         :param batch_size: The number of samples in a minibatch.
         """
+        if batch_size is None:
+            batch_size = self.batch_size
         self.pathpairs = load_files(self.datadir, self.src_prefix, self.tgt_prefix, self.tn_prefix) # Search for new data with every iteration ?
         for result in iterate_dir(self.device, self.pathpairs, batch_size, self.max_decomped, self.threads):
             yield result
@@ -316,5 +339,76 @@ class TruncateDepthLoader:
         logger.info(f"Truncating read depth to {self.max_read_depth}")
 
     def iter_once(self, batch_size):
-        for src, tgt, *_ in self.loader.iter_once(batch_size):
-            yield src[:, :, 0:self.max_read_depth, :], tgt, *_
+        for itemdict in self.loader.iter_once(batch_size):
+            yield {
+                "read": itemdict["read"][:, :, 0:self.max_read_depth, :],
+                "tgkmers": itemdict["tgkmers"],
+                "tntgt": itemdict["tntgt"],
+                "altmask": itemdict["altmask"],
+                "log_info": itemdict["log_info"],
+            }
+
+def is_lmdb_dir(datadir):
+    """
+    Check if the directory is an LMDB dir
+    :param datadir: Directory to check
+    :returns : True if the directory is an LMDB dir, False otherwise
+    """
+    return (Path(datadir) / "data.mdb").exists()
+
+
+def make_loader(datadir: Union[str, List[str]], **kwargs):
+    """
+    If they supply a single string value, we test to see if it's an LMDB dir or a pre-gen dir
+    If they supply a list of strings, we assume they are LMDB dirs
+    :param datadir: Directory to read data from
+    :param kwargs: Additional arguments to pass to the loader
+    :returns : Loader object
+    """
+    max_read_depth = kwargs.get('max_read_depth', -1)
+    if isinstance(datadir, str):
+        if is_lmdb_dir(datadir):
+            # Configure LMDB dataset with appropriate reader limits
+            max_readers = kwargs.get('max_readers', 126)
+            dataset = LMDBDataset(datadir, max_read_depth=max_read_depth, max_readers=max_readers)
+            logger.info(f"Created LMDB dataset with {len(dataset)} samples")
+            loader = DataLoader(
+                dataset, 
+                batch_size=kwargs.get('batch_size'), 
+                shuffle=kwargs.get('shuffle', True), 
+                num_workers=kwargs.get('num_workers', 1),
+                pin_memory=kwargs.get('pin_memory', True),
+                drop_last=kwargs.get('drop_last', True),
+                prefetch_factor=kwargs.get('prefetch_factor', 2),
+                persistent_workers=kwargs.get('persistent_workers', False),  # Disable persistent workers for LMDB
+                multiprocessing_context='spawn',  # Use spawn to avoid LMDB issues
+            )
+            return loader
+        else:
+            loader = PregenLoader(
+                        datadir, 
+                        tgt_prefix='tgkmers',
+                        **kwargs)
+            if max_read_depth != -1:
+                loader = TruncateDepthLoader(loader, max_read_depth)
+            return loader
+    else:
+        # Configure LMDB datasets with appropriate reader limits
+        max_readers = kwargs.get('max_readers', 126)
+        datasets = [LMDBDataset(d, max_read_depth=max_read_depth, max_readers=max_readers) for d in datadir]
+        total_samples = sum([len(d) for d in datasets])
+        logger.info(f"Created {len(datasets)} LMDB datasets with {total_samples} samples")
+        concat_dataset = torch.utils.data.ConcatDataset(datasets)
+        loader = DataLoader(
+            concat_dataset, 
+            batch_size=kwargs.get('batch_size'), 
+            shuffle=kwargs.get('shuffle', True), 
+            num_workers=kwargs.get('num_workers', 1),
+            pin_memory=kwargs.get('pin_memory', True),
+            drop_last=kwargs.get('drop_last', True),
+            prefetch_factor=kwargs.get('prefetch_factor', 2),
+            persistent_workers=kwargs.get('persistent_workers', False),  # Disable persistent workers for LMDB
+            multiprocessing_context='spawn',  # Use spawn to avoid LMDB issues
+        )
+        return loader
+    

@@ -237,7 +237,8 @@ class VarTransformer(nn.Module):
                  kmer_dim,
                  encoder_attention_heads,
                  decoder_attention_heads,
-                 d_ff,
+                 encoder_dim_ff,
+                 decoder_dim_ff,
                  embed_dim_factor,
                  n_encoder_layers,
                  n_decoder_layers,
@@ -264,7 +265,7 @@ class VarTransformer(nn.Module):
         encoder_layers = TransformerEncoderLayerSwiGLU(
             d_model=self.embed_dim,
             nhead=encoder_attention_heads,
-            dim_feedforward=d_ff,
+            dim_feedforward=encoder_dim_ff,
             dropout=p_dropout,
             batch_first=True)
         self.encoder = nn.TransformerEncoder(encoder_layers, num_layers=n_encoder_layers)
@@ -272,7 +273,7 @@ class VarTransformer(nn.Module):
         decoder_layers = TransformerDecoderLayerSwiGLU(
             d_model=self.decoder_embed_dim,
             nhead=decoder_attention_heads,
-            dim_feedforward=d_ff,
+            dim_feedforward=decoder_dim_ff,
             dropout=p_dropout,
             batch_first=True)
 

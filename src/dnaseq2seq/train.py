@@ -87,7 +87,10 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     tn_loss_weight = 0.1
 
     samples_perf = 0
-    for batch, (src, tgt_kmers, tntgt, altmask, log_info) in enumerate(loader_iter):
+    for batch, itemdict in enumerate(loader_iter):
+        src = itemdict["read"].float().to(DEVICE)
+        tgt_kmers = itemdict["tgkmers"].long().to(DEVICE)
+        tntgt = itemdict["tntgt"].float().to(DEVICE)
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -98,7 +101,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         logger.debug("Forward pass...")
 
         with amp.autocast('cuda', enabled=enable_amp): # dtype is bfloat16 by default
-            seq_preds, tn_head_preds = model(src, tgt_kmers_input, tgt_mask)
+            seq_preds, tn_head_preds = model(src.to(DEVICE), tgt_kmers_input.to(DEVICE), tgt_mask.to(DEVICE))
 
             logger.debug(f"Computing loss...")
             seq_loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
@@ -136,11 +139,11 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             return loss_sum
 
 
-def iter_indefinitely(loader, batch_size):
+def iter_indefinitely(loader):
     iterations = 0
     while True:
         iterations += 1
-        for items in loader.iter_once(batch_size):
+        for items in loader:
             yield items
         logger.info(f"Completed iteration {iterations} of all training data")
 
@@ -231,7 +234,10 @@ def calc_val_accuracy(loader, model, criterion):
         loss_tot = 0
 
         swap_tot = 0
-        for src, tgt_kmers, vaf, *_ in loader.iter_once(64):
+        for items in loader:
+            src = items["read"].float().to(DEVICE)
+            tgt_kmers = items["tgkmers"].long().to(DEVICE)
+            tntgt = items["tntgt"].float().to(DEVICE)
             total_batches += 1
             tot_samples += src.shape[0]
             seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
@@ -324,6 +330,10 @@ def load_model(modelconf, ckpt):
 
 
     logger.info(f"Model conf: {modelconf}")
+    if 'encoder_dim_ff' not in modelconf:
+        modelconf['encoder_dim_ff'] = modelconf['d_ff']
+    if 'decoder_dim_ff' not in modelconf:
+        modelconf['decoder_dim_ff'] = modelconf['d_ff']
     model = VarTransformer(read_depth=modelconf.get('max_read_depth', 150),
                            feature_count=modelconf['feats_per_read'],
                            kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
@@ -333,7 +343,8 @@ def load_model(modelconf, ckpt):
                            encoder_attention_heads=modelconf['encoder_attention_heads'],
                            decoder_attention_heads=modelconf['decoder_attention_heads'],
                             decoder_embed_dim=modelconf['decoder_embed_dim'],
-                           d_ff=modelconf['dim_feedforward'],
+                           encoder_dim_ff=modelconf['encoder_dim_ff'],
+                           decoder_dim_ff=modelconf['decoder_dim_ff'],
                            device=DEVICE)
 
     
@@ -397,7 +408,7 @@ def train_epochs(model,
     ])
 
     try:
-        sample_iter = iter_indefinitely(dataloader, batch_size)
+        sample_iter = iter_indefinitely(dataloader)
         for epoch in range(epochs):
             starttime = datetime.now()
             assert samples_per_epoch > 0, "Must have positive number of samples per epoch"
@@ -587,17 +598,11 @@ def train(output_model, **kwargs):
     
     logger.info(f"Using pregenerated training data from {kwargs.get('datadir')}")
 
-    dataloader = loader.PregenLoader(DEVICE,
-                                     kwargs.get("datadir"),
-                                     threads=kwargs.get('threads'),
-                                     max_decomped_batches=kwargs.get('max_decomp_batches'),
-                                     tgt_prefix="tgkmers")
-
-    val_dataloader = loader.PregenLoader(DEVICE,
-                                         kwargs.get("val_dir"),
-                                         threads=kwargs.get('threads'),
-                                         max_decomped_batches=kwargs.get('max_decomp_batches'),
-                                         tgt_prefix="tgkmers")
+    # dataloader = loader.PregenLoader(DEVICE,
+    #                                  kwargs.get("datadir"),
+    #                                  threads=kwargs.get('threads'),
+    #                                  max_decomped_batches=kwargs.get('max_decomp_batches'),
+    #                                  tgt_prefix="tgkmers")
 
     if kwargs.get('input_model'):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
@@ -608,9 +613,25 @@ def train(output_model, **kwargs):
     model_unwrapped = unwrap_model(model)
 
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
-    dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
-    val_dataloader = loader.TruncateDepthLoader(val_dataloader, model_unwrapped.read_depth)
+    
+    dataloader = loader.make_loader(
+        kwargs.get("datadir"), 
+        max_read_depth=model_unwrapped.read_depth,
+        batch_size=kwargs.get('batch_size'),
+        num_workers=kwargs.get('threads'),
+        max_decomp_batches=kwargs.get('max_decomp_batches'),
+        tgt_prefix="tgkmers"
+    )
+    logger.info(f"Train dataset length: {len(dataloader)}")
 
+    val_dataloader = loader.make_loader(
+        kwargs.get("val_dir"), 
+        max_read_depth=model_unwrapped.read_depth,
+        batch_size=kwargs.get('batch_size'),
+        num_workers=kwargs.get('threads'),
+        max_decomp_batches=kwargs.get('max_decomp_batches'),
+    )
+    logger.info(f"Val dataset length: {len(val_dataloader)}")
 
     if kwargs.get('model_encoder_fix'):
         logger.info(f"Loading and freezing encoder from {kwargs['model_encoder_fix']}")
