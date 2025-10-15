@@ -84,8 +84,8 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     scaler = GradScaler('cuda', enabled=enable_amp)
     start = time.perf_counter()
     tn_criterion = nn.BCEWithLogitsLoss()
-    tn_loss_weight = 0.1
-
+    tn_loss_weight = 0.5
+    
     samples_perf = 0
     for batch, itemdict in enumerate(loader_iter):
         src = itemdict["read"].float().to(DEVICE)
@@ -224,6 +224,9 @@ def calc_val_accuracy(loader, model, criterion):
     with torch.no_grad():
         match_sum0 = 0
         match_sum1 = 0
+        tn_tps_total = 0
+        tn_fps_total = 0
+        tn_fns_total = 0
         result_totals0 = init_count_dict()
         result_totals1 = init_count_dict()
 
@@ -240,8 +243,15 @@ def calc_val_accuracy(loader, model, criterion):
             tntgt = items["tntgt"].float().to(DEVICE)
             total_batches += 1
             tot_samples += src.shape[0]
-            seq_preds, probs = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
-
+            seq_preds, probs, tn_predictions = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
+            # Compute precision and recall for tn_predictions using tntgt as labels
+            tn_pred_labels = (tn_predictions.squeeze(-1) >= 0.5).float()
+            
+            tn_tps_total += ((tn_pred_labels == 1) & (tntgt == 1)).sum().item()
+            tn_fps_total += ((tn_pred_labels == 1) & (tntgt == 0)).sum().item()
+            tn_fns_total += ((tn_pred_labels == 0) & (tntgt == 1)).sum().item()
+            
+            
             #tgt_kmers = util.tgt_to_kmers(tgt[:, :, 0:truncate_seq_len]).float().to(DEVICE)
             tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)[:, :, 1:]
             j = tgt_kmer_idx.shape[-1]
@@ -258,14 +268,30 @@ def calc_val_accuracy(loader, model, criterion):
 
             var_counts_sum0 += varcount0
             var_counts_sum1 += varcount1
-                
-    return (match_sum0 / total_batches,
-            match_sum1 / total_batches,
-            var_counts_sum0 / tot_samples,
-            var_counts_sum1 / tot_samples,
-            result_totals0, result_totals1,
-            loss_tot,
-            swap_tot)
+
+    if tn_tps_total + tn_fns_total > 0:
+        tn_recall = tn_tps_total / (tn_tps_total + tn_fns_total)
+    else:
+        tn_recall = 0.0
+    if tn_tps_total + tn_fps_total > 0:
+        tn_precision = tn_tps_total / (tn_tps_total + tn_fps_total)
+    else:
+        tn_precision = 0.0
+    tn_f1 = 2 * tn_recall * tn_precision / (tn_recall + tn_precision)
+
+    return {
+        "acc0": match_sum0 / total_batches,
+        "acc1": match_sum1 / total_batches,
+        "var_count0": var_counts_sum0 / tot_samples,
+        "var_count1": var_counts_sum1 / tot_samples,
+        "result_totals0": result_totals0,
+        "result_totals1": result_totals1,
+        "loss": loss_tot,
+        "swap": swap_tot,
+        "tn_recall": tn_recall,
+        "tn_precision": tn_precision,
+        "tn_f1": tn_f1,
+    }
 
 
 def safe_compute_ppav(results0, results1, key):
@@ -422,21 +448,20 @@ def train_epochs(model,
 
             elapsed = datetime.now() - starttime
 
-            dist.barrier()
-
             # This runs on every process, to avoid communication timeouts when there are lots of validation samples
-            acc0, acc1, var_count0, var_count1, results0, results1, val_loss, swaps = calc_val_accuracy(val_loader, model, criterion)
+            # acc0, acc1, var_count0, var_count1, results0, results1, val_loss, swaps = calc_val_accuracy(val_loader, model, criterion)
+            resultdict = calc_val_accuracy(val_loader, model, criterion)
 
-            ppa_dels, ppv_dels = safe_compute_ppav(results0, results1, 'del')
-            ppa_ins, ppv_ins = safe_compute_ppav(results0, results1, 'ins')
-            ppa_snv, ppv_snv = safe_compute_ppav(results0, results1, 'snv')
+            ppa_dels, ppv_dels = safe_compute_ppav(resultdict['result_totals0'], resultdict['result_totals1'], 'del')
+            ppa_ins, ppv_ins = safe_compute_ppav(resultdict['result_totals0'], resultdict['result_totals1'], 'ins')
+            ppa_snv, ppv_snv = safe_compute_ppav(resultdict['result_totals0'], resultdict['result_totals1'], 'snv')
 
-            logger.info(f"Epoch {epoch} Secs: {elapsed.total_seconds():.2f} lr: {scheduler.get_last_lr():.5f} loss: {loss:.4f} val acc: {acc0:.3f} / {acc1:.3f}  ppa: {ppa_snv:.3f} / {ppa_ins:.3f} / {ppa_dels:.3f}  ppv: {ppv_snv:.3f} / {ppv_ins:.3f} / {ppv_dels:.3f} swaps: {swaps}")
+            logger.info(f"Epoch {epoch} Secs: {elapsed.total_seconds():.2f} lr: {scheduler.get_last_lr():.5f} loss: {loss:.4f} TN ppa/v: {resultdict['tn_recall']:.3f} / {resultdict['tn_precision']:.3f}  hap ppa: {ppa_snv:.3f} / {ppa_ins:.3f} / {ppa_dels:.3f}  ppv: {ppv_snv:.3f} / {ppv_ins:.3f} / {ppv_dels:.3f} swaps: {swaps}")
             trainlogger.log({
                 "epoch": epoch,
                 "trainingloss": loss,
-                "val_accuracy": acc0.item() if isinstance(acc0, torch.Tensor) else acc0,
-                "mean_var_count": var_count0,
+                "val_accuracy": resultdict['acc0'].item() if isinstance(resultdict['acc0'], torch.Tensor) else resultdict['acc0'],
+                "mean_var_count": resultdict['var_count0'],
                 "ppa_snv": ppa_snv,
                 "ppa_ins": ppa_ins,
                 "ppa_dels": ppa_dels,
@@ -451,17 +476,20 @@ def train_epochs(model,
                 experiment.log_metrics({
                     "epoch": epoch,
                     "trainingloss": loss,
-                    "validation_loss": val_loss,
-                    "accuracy/val_acc_hap0": acc0,
-                    "accuracy/val_acc_hap1": acc1,
-                    "accuracy/var_count0": var_count0,
-                    "accuracy/var_count1": var_count1,
+                    "validation_loss": resultdict['loss'],
+                    "accuracy/val_acc_hap0": resultdict['acc0'],
+                    "accuracy/val_acc_hap1": resultdict['acc1'],
+                    "accuracy/var_count0": resultdict['var_count0'],
+                    "accuracy/var_count1": resultdict['var_count1'],
                     "accuracy/ppa dels": ppa_dels,
                     "accuracy/ppa ins": ppa_ins,
                     "accuracy/ppa snv": ppa_snv,
                     "accuracy/ppv dels": ppv_dels,
                     "accuracy/ppv ins": ppv_ins,
                     "accuracy/ppv snv": ppv_snv,
+                    "tn_stats/tn_recall": resultdict['tn_recall'],
+                    "tn_stats/tn_precision": resultdict['tn_precision'],
+                    "tn_stats/tn_f1": resultdict['tn_f1'],
                     "learning_rate": scheduler.get_last_lr(),
                     "hap_swaps": swaps,
                     "epochtime": elapsed.total_seconds(),
@@ -479,7 +507,7 @@ def train_epochs(model,
                     'opt': optimizer.state_dict(),
                 }
                 torch.save(ckpt_data, checkpoint_name)
-            dist.barrier()
+            
         logger.info(f"Training completed after {epoch} epochs")
     except KeyboardInterrupt:
         pass
@@ -605,7 +633,7 @@ def train(output_model, **kwargs):
     #                                  tgt_prefix="tgkmers")
 
     if kwargs.get('input_model'):
-        ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
+        ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE, weights_only=False)
     else:
         ckpt = None
     model = load_model(kwargs['model'], ckpt)
