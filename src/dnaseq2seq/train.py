@@ -24,7 +24,7 @@ from dnaseq2seq import loader
 from dnaseq2seq import util
 from dnaseq2seq.model import VarTransformer
 from dnaseq2seq import loggers
-from dnaseq2seq.modelcheckpointer import Checkpointer
+from dnaseq2seq.modelcheckpointer import CheckpointManager
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s'
 formatter = logging.Formatter(LOG_FORMAT)
@@ -88,10 +88,12 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     scaler = GradScaler(enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
+    tn_criterion = nn.BCEWithLogitsLoss()
+    tn_loss_weight = 0.1
     for batch, data in enumerate(loader_iter):
         src = data["src"]
         tgt_kmers = data["tgt"]
-        tgt_cls = data["tgt_cls"]
+        tgt_cls = data["tntgt"]
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -106,6 +108,9 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
 
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
+
+            tnloss = tn_criterion(cls_pred.squeeze(1), tgt_cls)
+            loss = loss + tn_loss_weight * tnloss
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -414,7 +419,7 @@ def train_epochs(model,
 
     model_save_dir = Path(model_dest).parent
     model_save_prefix = Path(model_dest).stem
-    checkpointer = Checkpointer(model=unwrap_model(model),
+    checkpointer = CheckpointManager(model=unwrap_model(model),
                                 save_prefix=model_save_prefix,
                                 save_dir=model_save_dir,
                                 minimize=True,
@@ -615,7 +620,7 @@ def train(output_model, **kwargs):
                                      tgt_prefix="tgkmers")
 
     if kwargs.get('input_model'):
-        ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE)
+        ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE, weights_only=False)
     else:
         ckpt = None
     model = load_model(kwargs['model'], ckpt)
