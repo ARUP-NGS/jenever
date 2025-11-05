@@ -4,7 +4,8 @@ from dataclasses import dataclass
 import logging
 import pysam
 
-from skbio.alignment import StripedSmithWaterman
+# from skbio.alignment import StripedSmithWaterman
+from skbio.alignment import pair_align, PairAlignPath
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -114,17 +115,32 @@ def _geomean(probs):
     return np.exp(np.log(probs).mean())
 
 
-def align_sequences(query, target, gap_open_penalty=3, gap_extend_penalty=1, match_score=2, mismatch_score=-1):
+def align_sequences_ssw(query, target, gap_open_penalty=3, gap_extend_penalty=1, match_score=2, mismatch_score=-1):
     """
     Return Smith-Watterman alignment of both sequences
     """
     # TODO SSW in skbio is deprecated (see https://github.com/scikit-bio/scikit-bio/issues/1814)
+    from skbio.alignment import StripedSmithWaterman
     ssw = StripedSmithWaterman(query,
                                gap_open_penalty=gap_open_penalty,
                                gap_extend_penalty=gap_extend_penalty,
                                match_score=match_score,
                                mismatch_score=mismatch_score)
     return ssw(target)
+
+    
+
+def align_sequences_new(query, target, gap_open_penalty=3, gap_extend_penalty=1, match_score=2, mismatch_score=-1):
+    """
+    Return Smith-Waterman alignment of both sequences
+    """
+    aln = pair_align(query, target, 
+                    mode='global',
+                    sub_score=(match_score, mismatch_score),
+                    gap_cost=(gap_open_penalty, gap_extend_penalty),
+                    free_ends=True,
+                    trim_ends=True)
+    return aln
 
 
 def _mismatches_to_vars(query, target, chrom, cig_offset, window_offset, probs):
@@ -201,7 +217,8 @@ def _display_aln(aln):
             raise ValueError(f"Unknown cigar op {cig.op}")
 
 
-def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
+
+def _aln_to_vars063(refseq, altseq, chrom, offset=0, probs=None):
     """
     Smith-Watterman align the given sequences and return a generator over Variant objects
     that describe differences between the sequences
@@ -215,7 +232,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
         assert len(probs) == len(altseq), f"Probabilities must contain same number of elements as alt sequence"
     else:
         probs = np.ones(len(altseq))
-    aln = align_sequences(altseq, refseq, gap_open_penalty=4, gap_extend_penalty=0.2, match_score=1, mismatch_score=-1)
+    aln = align_sequences_ssw(altseq, refseq, gap_open_penalty=4, gap_extend_penalty=0.2, match_score=1, mismatch_score=-2)
     ref_seq_consumed = 0
     q_offset = 0
     t_offset = 0
@@ -228,7 +245,7 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
         t_offset += aln.target_begin
 
     variants = []
-    for cig in _cigtups(aln.cigar):
+    for cig in _cigtups(aln.to_cigar()):
         if cig.op == "M":
             for v in _mismatches_to_vars(
                         refseq[t_offset:t_offset+cig.len],
@@ -275,11 +292,158 @@ def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
             variant_pos_offset += cig.len
 
     for v in variants:
-        v.aln_score = aln.optimal_alignment_score
+        v.aln_score = aln.score #aln.optimal_alignment_score
         v.var_count = len(variants)
 
     return variants
 
+
+def left_align(ref_seq: str, var: Variant, min_pos: int = 0, var_offset: int = 0) -> Variant:
+    """
+    Left-align a variant
+    Note that this MODIFIES IN PLACE
+    
+    This has no effect on substitutions or complex replacements (len(ref) == len(alt) > 0)
+    
+    Returns: Modified variant
+    """
+    ref = var.ref
+    alt = var.alt
+    pos = var.pos - var_offset
+    min_pos = min_pos - var_offset
+    # Skip substitutions or complex replacements
+    if len(ref) == len(alt):
+        return var
+
+    # Validate deletion matches reference (safe-guard; skip shift if not)
+    if ref and not alt:
+        if ref_seq[pos:pos+len(ref)] != ref:
+            return var  # ref seq doesn't match ref allele
+
+        # Rotate the deleted motif left while the preceding base matches the last base of the motif
+        while pos > min_pos and ref and ref_seq[pos - 1] == ref[-1]:
+            # Move last char of ref to front (cyclic rotation) and shift position left
+            ref = ref[-1] + ref[:-1]
+            pos -= 1
+        var.pos = pos + var_offset
+        var.ref = ref
+        var.alt = alt
+        return var
+
+    # Insertion
+    if alt and not ref:
+        # Rotate the inserted motif left while the preceding base matches the last base of the insertion
+        while pos > min_pos and alt and ref_seq[pos - 1] == alt[-1]:
+            # Move last char of alt to front (cyclic rotation) and shift position left
+            alt = alt[-1] + alt[:-1]
+            pos -= 1
+        var.pos = pos + var_offset
+        var.ref = ref
+        var.alt = alt
+        return var
+
+    # If we ever see a mixed-length change with both non-empty (shouldn't happen in minimal form), leave as-is
+    return var
+
+
+def aln_to_vars_071(refseq, altseq, chrom, offset=0, probs=None):
+    """
+    Smith-Watterman align the given sequences and return a generator over Variant objects
+    that describe differences between the sequences
+    :param refseq: String of bases representing reference sequence
+    :param altseq: String of bases representing alt sequence
+    :param offset: This amount will be added to each variant position
+    :return: Generator over variants
+    """
+    num_vars = 0
+    if probs is not None:
+        assert len(probs) == len(altseq), f"Probabilities must contain same number of elements as alt sequence"
+    else:
+        probs = np.ones(len(altseq))
+    aln = align_sequences_new(altseq, refseq, gap_open_penalty=4, gap_extend_penalty=0.2, match_score=1, mismatch_score=-2)
+    path = aln.paths[0]
+    ref_seq_consumed = 0
+    q_offset = 0
+    t_offset = 0
+
+    variant_pos_offset = 0
+    # if aln.query_begin > 0:
+    #     q_offset += aln.query_begin # Maybe we don't want this? query is alt sequence, so nonzero indicates first alt base matches downstream of first ref base
+    # if aln.target_begin > 0:
+    #     ref_seq_consumed += aln.target_begin
+    #     t_offset += aln.target_begin
+
+    variants = []
+    for cig in _cigtups(path.to_cigar()):
+        if cig.op == "M":
+            for v in _mismatches_to_vars(
+                        refseq[t_offset:t_offset+cig.len],
+                        altseq[q_offset:q_offset+cig.len],
+                        chrom,
+                        offset + t_offset,
+                        t_offset,
+                        probs[q_offset:q_offset+cig.len]
+            ):
+                v.var_index = num_vars
+                variants.append(v)
+                num_vars += 1
+            q_offset += cig.len
+            variant_pos_offset += cig.len
+            t_offset += cig.len
+
+        elif cig.op == "I":
+            variants.append(
+                Variant(
+                        chrom=chrom,
+                        ref='',
+                        alt=altseq[q_offset:q_offset+cig.len],
+                        pos=offset + variant_pos_offset + path.starts[1],
+                        qual=_geomean(probs[q_offset:q_offset+cig.len]),
+                        window_offset=variant_pos_offset,
+                        var_index=num_vars)
+                )
+            num_vars += 1
+            q_offset += cig.len
+            # variant_pos_offset += cig.len
+
+        elif cig.op == "D":
+            variants.append(
+                Variant(chrom=chrom,
+                        ref=refseq[t_offset:t_offset + cig.len],
+                        alt='',
+                        pos=offset + t_offset,
+                        qual=_geomean(probs[q_offset-1:q_offset+cig.len]),
+                        window_offset=t_offset,
+                        var_index=num_vars)
+                )
+            num_vars += 1
+            t_offset += cig.len
+            variant_pos_offset += cig.len
+
+    variants = sorted(variants, key=lambda x: x.pos)
+    min_pos = offset
+    for v in variants:
+        if len(v.ref) == 0 or len(v.alt) == 0:
+            v = left_align(refseq, v, min_pos, var_offset=offset)
+        min_pos = v.pos + 1
+
+    for v in variants:
+        v.aln_score = aln.score #aln.optimal_alignment_score
+        v.var_count = len(variants)
+        if len(v.ref) == 0 and len(v.alt) == 0:
+            logger.error("Found a variant with no ref or alt, this should not happen")
+            logger.error(f"Variant: {v}")
+            print(f"Refseq: {refseq}")
+            print(f"Altseq: {altseq}")
+            print(f"Path: {path}")
+            print(f"Cigars: {path.to_cigar()}")
+            
+            raise ValueError("Found a variant with no ref or alt, this should not happen")
+
+    return variants
+
+def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
+    return aln_to_vars_071(refseq, altseq, chrom, offset, probs)
 
 def var_depth(chrom, pos, aln):
     """

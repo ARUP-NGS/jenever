@@ -1,6 +1,7 @@
 
 from itertools import product, permutations
-from skbio.alignment import StripedSmithWaterman
+# from skbio.alignment import StripedSmithWaterman
+from skbio.alignment import pair_align, PairAlignPath
 import logging
 import pysam
 from intervaltree import IntervalTree
@@ -273,7 +274,8 @@ def score_genotypes(aln, ref_sequence, region_start, variants):
         for _ in range(len(gt.haplotypes))
     ]
     ssws = [
-        [StripedSmithWaterman(hap.seq) for hap in gts.haplotypes]
+        # [StripedSmithWaterman(hap.seq) for hap in gts.haplotypes]
+        [pair_align(hap.seq, ref_sequence, mode='local', sub_score=(1, -2), gap_cost=(4, 0.2), free_ends=True, trim_ends=True) for hap in gts.haplotypes]
         for gts in genotypes
     ]
 

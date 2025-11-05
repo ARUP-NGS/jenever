@@ -89,7 +89,8 @@ class CheckpointManager:
             return True
             
         # Otherwise, only save if better than worst checkpoint
-        worst = self.checkpoints[0]  # heap[0] is always the worst when using a min heap
+        # Find the worst checkpoint (max heap_value, since smaller is better after sign transform)
+        worst = max(self.checkpoints, key=lambda x: x.value)
         if record < worst:  # Using __lt__ defined in CheckpointRecord
             # Remove old checkpoint file
             if os.path.exists(worst.filepath):
@@ -98,8 +99,13 @@ class CheckpointManager:
             # Save new checkpoint
             self._save_checkpoint(record, kwargs)
             
-            # Update heap
-            heapq.heapreplace(self.checkpoints, record)
+            # Replace worst checkpoint in heap
+            # Find index of worst checkpoint
+            worst_idx = self.checkpoints.index(worst)
+            # Replace it with new record
+            self.checkpoints[worst_idx] = record
+            # Reheapify to maintain heap property
+            heapq.heapify(self.checkpoints)
             return True
             
         return False
@@ -118,9 +124,9 @@ class CheckpointManager:
         """Returns path to the best checkpoint file"""
         if not self.checkpoints:
             return None
-        # Last element is the best in a min heap
-        return self.checkpoints[-1].filepath
+        # heap[0] is always the best (minimum heap_value after sign transform)
+        return self.checkpoints[0].filepath
     
     def get_all_checkpoints(self) -> list[str]:
         """Returns list of all checkpoint files, sorted from worst to best"""
-        return [record.filepath for record in sorted(self.checkpoints)]
+        return [record.filepath for record in sorted(self.checkpoints, reverse=True)]

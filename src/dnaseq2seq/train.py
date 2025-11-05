@@ -329,8 +329,8 @@ def load_fix_encoder(model, ckpt):
 def load_model(modelconf, ckpt):
     statedict = None
     if ckpt is not None:
-        if 'model' in ckpt:
-            statedict = ckpt['model']
+        if 'model_state_dict' in ckpt:
+            statedict = ckpt['model_state_dict']
             new_state_dict = {}
             for key in statedict.keys():
                 new_key = key.replace('_orig_mod.', '')
@@ -621,9 +621,10 @@ def train(output_model, **kwargs):
 
     if kwargs.get('input_model'):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE, weights_only=False)
+        model = load_model(ckpt['conf'], ckpt)
     else:
         ckpt = None
-    model = load_model(kwargs['model'], ckpt)
+        model = load_model(kwargs['model'], ckpt)
 
     model_unwrapped = unwrap_model(model)
 
