@@ -4,8 +4,8 @@ from dataclasses import dataclass
 import logging
 import pysam
 
-# from skbio.alignment import StripedSmithWaterman
-from skbio.alignment import pair_align, PairAlignPath
+from skbio.alignment import StripedSmithWaterman
+# from skbio.alignment import pair_align, PairAlignPath
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -218,7 +218,7 @@ def _display_aln(aln):
 
 
 
-def _aln_to_vars063(refseq, altseq, chrom, offset=0, probs=None):
+def _aln_to_vars_063(refseq, altseq, chrom, offset=0, probs=None):
     """
     Smith-Watterman align the given sequences and return a generator over Variant objects
     that describe differences between the sequences
@@ -245,7 +245,7 @@ def _aln_to_vars063(refseq, altseq, chrom, offset=0, probs=None):
         t_offset += aln.target_begin
 
     variants = []
-    for cig in _cigtups(aln.to_cigar()):
+    for cig in _cigtups(aln.cigar):
         if cig.op == "M":
             for v in _mismatches_to_vars(
                         refseq[t_offset:t_offset+cig.len],
@@ -292,7 +292,7 @@ def _aln_to_vars063(refseq, altseq, chrom, offset=0, probs=None):
             variant_pos_offset += cig.len
 
     for v in variants:
-        v.aln_score = aln.score #aln.optimal_alignment_score
+        v.aln_score = aln.optimal_alignment_score
         v.var_count = len(variants)
 
     return variants
@@ -346,7 +346,7 @@ def left_align(ref_seq: str, var: Variant, min_pos: int = 0, var_offset: int = 0
     return var
 
 
-def aln_to_vars_071(refseq, altseq, chrom, offset=0, probs=None):
+def _aln_to_vars_071(refseq, altseq, chrom, offset=0, probs=None):
     """
     Smith-Watterman align the given sequences and return a generator over Variant objects
     that describe differences between the sequences
@@ -443,7 +443,7 @@ def aln_to_vars_071(refseq, altseq, chrom, offset=0, probs=None):
     return variants
 
 def aln_to_vars(refseq, altseq, chrom, offset=0, probs=None):
-    return aln_to_vars_071(refseq, altseq, chrom, offset, probs)
+    return _aln_to_vars_063(refseq, altseq, chrom, offset, probs)
 
 def var_depth(chrom, pos, aln):
     """

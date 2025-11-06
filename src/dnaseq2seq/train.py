@@ -85,15 +85,15 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     samples_seen = 0
     loss_sum = 0
     model.train()
-    scaler = GradScaler(enabled=enable_amp)
+    scaler = torch.amp.GradScaler('cuda', enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
     tn_criterion = nn.BCEWithLogitsLoss()
     tn_loss_weight = 0.1
     for batch, data in enumerate(loader_iter):
-        src = data["src"]
-        tgt_kmers = data["tgt"]
-        tgt_cls = data["tntgt"]
+        src = data["read"].float().to(DEVICE)
+        tgt_kmers = data["tgkmers"].long().to(DEVICE)
+        tgt_cls = data["tntgt"].float().to(DEVICE)
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -103,7 +103,7 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         optimizer.zero_grad()
         logger.debug("Forward pass...")
 
-        with amp.autocast(enabled=enable_amp): # dtype is bfloat16 by default
+        with torch.amp.autocast(device_type='cuda', enabled=enable_amp): # dtype is bfloat16 by default
             seq_preds, cls_pred = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
@@ -142,11 +142,11 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
             return loss_sum
 
 
-def iter_indefinitely(loader, batch_size):
+def iter_indefinitely(loader):
     iterations = 0
     while True:
         iterations += 1
-        for items in loader.iter_once(batch_size):
+        for items in loader:
             yield items
         logger.info(f"Completed iteration {iterations} of all training data")
 
@@ -238,10 +238,10 @@ def calc_val_accuracy(loader, model, criterion):
         tot_f1 = 0
 
         swap_tot = 0
-        for i, data in enumerate(loader.iter_once(64)):
-            src = data["src"]
-            tgt_kmers = data["tgt"]
-            tgt_cls = data["tntgt"]
+        for i, data in enumerate(loader):
+            src = data["read"].float().to(DEVICE)
+            tgt_kmers = data["tgkmers"].long().to(DEVICE)
+            tgt_cls = data["tntgt"].float().to(DEVICE)
             total_batches += 1
             tot_samples += src.shape[0]
             seq_preds, probs, tn_logits = util.predict_sequence(src, model, n_output_toks=37, device=DEVICE) # 150 // 4 = 37, this will need to be changed if we ever want to change the output length
@@ -399,7 +399,6 @@ def train_epochs(model,
                  scheduler,
                  checkpoint_freq=0,
                  model_dest=None,
-                 batch_size=64,
                  xtra_checkpoint_items={},
                  samples_per_epoch=10000,
 ):
@@ -426,7 +425,7 @@ def train_epochs(model,
                                 max_checkpoints=5)
 
     try:
-        sample_iter = iter_indefinitely(dataloader, batch_size)
+        sample_iter = iter_indefinitely(dataloader)
         for epoch in range(epochs):
             starttime = datetime.now()
             assert samples_per_epoch > 0, "Must have positive number of samples per epoch"
@@ -607,17 +606,17 @@ def train(output_model, **kwargs):
     
     logger.info(f"Using pregenerated training data from {kwargs.get('datadir')}")
 
-    dataloader = loader.PregenLoader(DEVICE,
-                                     kwargs.get("datadir"),
-                                     threads=kwargs.get('threads'),
-                                     max_decomped_batches=kwargs.get('max_decomp_batches'),
-                                     tgt_prefix="tgkmers")
+    # dataloader = loader.PregenLoader(DEVICE,
+    #                                  kwargs.get("datadir"),
+    #                                  threads=kwargs.get('threads'),
+    #                                  max_decomped_batches=kwargs.get('max_decomp_batches'),
+    #                                  tgt_prefix="tgkmers")
 
-    val_loader = loader.PregenLoader(DEVICE,
-                                     kwargs.get("val_dir"),
-                                     threads=kwargs.get('threads'),
-                                     max_decomped_batches=kwargs.get('max_decomp_batches'),
-                                     tgt_prefix="tgkmers")
+    # val_loader = loader.PregenLoader(DEVICE,
+    #                                  kwargs.get("val_dir"),
+    #                                  threads=kwargs.get('threads'),
+    #                                  max_decomped_batches=kwargs.get('max_decomp_batches'),
+    #                                  tgt_prefix="tgkmers")
 
     if kwargs.get('input_model'):
         ckpt = torch.load(kwargs.get("input_model"), map_location=DEVICE, weights_only=False)
@@ -629,9 +628,23 @@ def train(output_model, **kwargs):
     model_unwrapped = unwrap_model(model)
 
     logger.info(f"Truncating max read depth to {model_unwrapped.read_depth}")
-    dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
+    # dataloader = loader.TruncateDepthLoader(dataloader, model_unwrapped.read_depth)
+    dataloader = loader.make_loader(kwargs.get('datadir'), 
+                                    batch_size=kwargs.get('batch_size'),
+                                    num_workers=kwargs.get('threads'),
+                                    shuffle=True,
+                                    pin_memory=True,
+                                    drop_last=True,
+                                    max_read_depth=model_unwrapped.read_depth)
  
-    val_loader = loader.TruncateDepthLoader(val_loader, model_unwrapped.read_depth)
+    # val_loader = loader.TruncateDepthLoader(val_loader, model_unwrapped.read_depth)
+    val_loader = loader.make_loader(kwargs.get('val_dir'), 
+                                    num_workers=kwargs.get('threads'),
+                                    batch_size=kwargs.get('batch_size'),
+                                    shuffle=False,
+                                    pin_memory=True,
+                                    drop_last=False,
+                                    max_read_depth=model_unwrapped.read_depth)
 
 
     if kwargs.get('model_encoder_fix'):
@@ -673,7 +686,6 @@ def train(output_model, **kwargs):
                  scheduler=scheduler,
                  model_dest=output_model,
                  checkpoint_freq=kwargs.get('checkpoint_freq', 10),
-                 batch_size=kwargs.get("batch_size"),
                  samples_per_epoch=kwargs.get('samples_per_epoch'),
                  xtra_checkpoint_items=kwargs['model'],
                  )
