@@ -15,6 +15,7 @@ import io
 import functools
 from typing import Union, List
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 import numpy as np
 import torch
@@ -389,6 +390,7 @@ def make_loader(datadir: Union[str, List[str]], **kwargs):
             loader = DataLoader(
                 dataset, 
                 batch_size=kwargs.get('batch_size'), 
+                sampler=DistributedSampler(dataset),
                 shuffle=kwargs.get('shuffle', True), 
                 num_workers=kwargs.get('num_workers', 1),
                 pin_memory=kwargs.get('pin_memory', True),
@@ -416,6 +418,7 @@ def make_loader(datadir: Union[str, List[str]], **kwargs):
         loader = DataLoader(
             concat_dataset, 
             batch_size=kwargs.get('batch_size'), 
+            sampler=DistributedSampler(concat_dataset),
             shuffle=kwargs.get('shuffle', True), 
             num_workers=kwargs.get('num_workers', 1),
             pin_memory=kwargs.get('pin_memory', True),

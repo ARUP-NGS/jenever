@@ -41,6 +41,9 @@ def do_train(*args, **kwargs):
 
 def do_evaluate(*args, **kwargs):
     from dnaseq2seq.evaluate import evaluate_model
+    del kwargs['func']
+    del kwargs['cmdline']
+    del kwargs['cl_args']
     evaluate_model(*args, **kwargs)
 
 

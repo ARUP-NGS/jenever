@@ -22,7 +22,7 @@ def load_model_for_eval(model_path):
     """
     logger.info(f"Loading model from {model_path}")
     model_info = torch.load(model_path, map_location=DEVICE, weights_only=False)
-    statedict = model_info['model']
+    statedict = model_info['model_state_dict']
     modelconf = model_info['conf']
     
     # Remove '_orig_mod.' prefix from state dict keys if present (from torch.compile)
@@ -54,7 +54,7 @@ def load_model_for_eval(model_path):
     return model, modelconf
 
 
-def evaluate_model(model_path, dataset_path, batch_size=64, threads=1):
+def evaluate_model(model_path, dataset_path, batch_size=64, threads=1, device=DEVICE):
     """
     Evaluate a model on a dataset and print all evaluation metrics to standard output.
     
