@@ -39,6 +39,10 @@ def do_train(*args, **kwargs):
     from dnaseq2seq.train import train
     train(*args, **kwargs)
 
+def do_evaluate(*args, **kwargs):
+    from dnaseq2seq.evaluate import evaluate_model
+    evaluate_model(*args, **kwargs)
+
 
 def alphanumeric_no_spaces(name):
     if re.match(r"[a-zA-Z0-9_-]+", name):
@@ -107,6 +111,13 @@ def main():
 
 
     callparser.set_defaults(func=do_call)
+
+    evalparser = subparser.add_parser("evaluate", help="Evaluate a model on a dataset")
+    evalparser.add_argument("-m", "--model-path", help="Path to model checkpoint file", required=True)
+    evalparser.add_argument("-d", "--dataset-path", help="Path to dataset directory (LMDB or pre-generated)", required=True)
+    evalparser.add_argument("-b", "--batch-size", help="Batch size for evaluation", type=int, default=64)
+    evalparser.add_argument("-t", "--threads", help="Number of worker processes for data loading", type=int, default=1)
+    evalparser.set_defaults(func=do_evaluate)
 
     args = parser.parse_args()
     if len(vars(args)) == 0 or not hasattr(args, 'func'):
