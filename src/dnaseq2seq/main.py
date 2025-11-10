@@ -8,11 +8,11 @@ import re
 import sklearn
 
 import argparse
+import torch
 
 from dnaseq2seq import util as util
 from dnaseq2seq import loader as loader
 from dnaseq2seq import __version__ as VERSION
-from dnaseq2seq import util as util
 
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s '
@@ -45,6 +45,47 @@ def do_evaluate(*args, **kwargs):
     del kwargs['cmdline']
     del kwargs['cl_args']
     evaluate_model(*args, **kwargs)
+
+def do_convert_checkpoint(*args, **kwargs):
+    """Convert checkpoint to bf16 format, keeping only model_state_dict and conf"""
+    input_checkpoint = kwargs.get('input_checkpoint')
+    output_checkpoint = kwargs.get('output_checkpoint')
+    
+    if not input_checkpoint or not output_checkpoint:
+        raise ValueError("Both input-checkpoint and output-checkpoint are required")
+    
+    logger.info(f"Loading checkpoint from {input_checkpoint}")
+    checkpoint = torch.load(input_checkpoint, map_location='cpu', weights_only=False)
+    
+    # Extract model_state_dict and conf
+    if 'model_state_dict' not in checkpoint:
+        raise ValueError(f"Checkpoint does not contain 'model_state_dict' key. Available keys: {list(checkpoint.keys())}")
+    
+    model_state_dict = checkpoint['model_state_dict']
+    conf = checkpoint.get('conf')
+    
+    if conf is None:
+        logger.warning("Checkpoint does not contain 'conf' key. Saving without it.")
+    
+    # Convert model parameters to bf16
+    logger.info("Converting model parameters to bfloat16 precision")
+    bf16_state_dict = {}
+    for key, value in model_state_dict.items():
+        if isinstance(value, torch.Tensor) and value.dtype.is_floating_point:
+            bf16_state_dict[key] = value.to(torch.bfloat16)
+        else:
+            bf16_state_dict[key] = value
+    
+    # Create new checkpoint with only model_state_dict and conf
+    new_checkpoint = {
+        'model_state_dict': bf16_state_dict
+    }
+    if conf is not None:
+        new_checkpoint['conf'] = conf
+    
+    logger.info(f"Saving converted checkpoint to {output_checkpoint}")
+    torch.save(new_checkpoint, output_checkpoint)
+    logger.info("Checkpoint conversion completed successfully")
 
 
 def alphanumeric_no_spaces(name):
@@ -121,6 +162,11 @@ def main():
     evalparser.add_argument("-b", "--batch-size", help="Batch size for evaluation", type=int, default=64)
     evalparser.add_argument("-t", "--threads", help="Number of worker processes for data loading", type=int, default=1)
     evalparser.set_defaults(func=do_evaluate)
+
+    convertparser = subparser.add_parser("convert-checkpoint", help="Convert checkpoint to bf16 format, keeping only model_state_dict and conf")
+    convertparser.add_argument("-i", "--input-checkpoint", help="Path to input checkpoint file", required=True)
+    convertparser.add_argument("-o", "--output-checkpoint", help="Path to output checkpoint file", required=True)
+    convertparser.set_defaults(func=do_convert_checkpoint)
 
     args = parser.parse_args()
     if len(vars(args)) == 0 or not hasattr(args, 'func'):

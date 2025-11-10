@@ -4,6 +4,7 @@ import datetime
 import os
 import bisect
 import time
+from tkinter.constants import TRUE
 
 import torch
 import torch.nn as nn
@@ -408,31 +409,33 @@ def expand_to_bases(vals, expansion_factor=TGT_KMER_SIZE):
     return list(chain(*([k]*expansion_factor for k in vals)))
 
 
+@torch.inference_mode()
 def predict_sequence(src, model, n_output_toks, device):
     """
     Generate a predicted sequence with next-word prediction be repeatedly calling the model
     """
-    if isinstance(model, nn.DataParallel) or isinstance(model, DistributedDataParallel):
-        model = model.module
-    start = time.perf_counter()
-    predictions = torch.stack((START_TOKEN, START_TOKEN), dim=0).expand(src.shape[0], -1, -1, -1).float().to(device)
-    probs = torch.zeros(src.shape[0], 2, 1).float().to(device)
-    mem, cls_pred = model.encode(src)
-    encode = time.perf_counter()
-    encode_elapsed = encode - start
-    step_time = time.perf_counter()
-    for i in range(n_output_toks + 1):
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(predictions.shape[-2]).to(device)
-        new_preds = model.decode(mem, predictions, tgt_mask=tgt_mask)[:, :, -1:, :]
-        new_probs, tophit = torch.max(new_preds, dim=-1)
-        p = torch.nn.functional.one_hot(tophit, num_classes=FEATURE_DIM)
-        predictions = torch.concat((predictions, p), dim=2)
-        probs = torch.concat((probs, new_probs), dim=-1)
-        logger.debug(f"Prediction step {i} time: {time.perf_counter() - step_time :.5f}")
+    with torch.amp.autocast(device_type='cuda', enabled=True):
+        if isinstance(model, nn.DataParallel) or isinstance(model, DistributedDataParallel):
+            model = model.module
+        start = time.perf_counter()
+        predictions = torch.stack((START_TOKEN, START_TOKEN), dim=0).expand(src.shape[0], -1, -1, -1).float().to(device)
+        probs = torch.zeros(src.shape[0], 2, 1).float().to(device)
+        mem, cls_pred = model.encode(src)
+        encode = time.perf_counter()
+        encode_elapsed = encode - start
         step_time = time.perf_counter()
-    decode_elapsed = time.perf_counter() - encode
-    logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
-    return predictions[:, :, 1:, :], probs[:, :, 1:], cls_pred
+        for i in range(n_output_toks + 1):
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(predictions.shape[-2]).to(device)
+            new_preds = model.decode(mem, predictions, tgt_mask=tgt_mask)[:, :, -1:, :]
+            new_probs, tophit = torch.max(new_preds, dim=-1)
+            p = torch.nn.functional.one_hot(tophit, num_classes=FEATURE_DIM)
+            predictions = torch.concat((predictions, p), dim=2)
+            probs = torch.concat((probs, new_probs), dim=-1)
+            logger.debug(f"Prediction step {i} time: {time.perf_counter() - step_time :.5f}")
+            step_time = time.perf_counter()
+        decode_elapsed = time.perf_counter() - encode
+        logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
+        return predictions[:, :, 1:, :], probs[:, :, 1:], cls_pred
 
 def default_chrom_sort_key(c):
     c = c.replace("chr", "")

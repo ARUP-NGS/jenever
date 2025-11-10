@@ -112,8 +112,8 @@ def load_model(model_path):
     Model is compiled with torch.compile and set to eval mode
     :returns: VariantTransformer model with parameters loaded
     """
-    model_info = torch.load(model_path, map_location=DEVICE)
-    statedict = model_info['model']
+    model_info = torch.load(model_path, map_location=DEVICE, weights_only=False)
+    statedict = model_info['model_state_dict']
     modelconf = model_info['conf']
     new_state_dict = {}
     for key in statedict.keys():

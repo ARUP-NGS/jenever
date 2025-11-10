@@ -14,7 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 import io
 import functools
 from typing import Union, List
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
 import numpy as np
@@ -381,17 +381,30 @@ def make_loader(datadir: Union[str, List[str]], **kwargs):
     :returns : Loader object
     """
     max_read_depth = kwargs.get('max_read_depth', -1)
+    # Check if we're in a distributed context
+    use_distributed = (torch.distributed.is_initialized() and 
+                      torch.distributed.get_world_size() > 1)
+    
     if isinstance(datadir, str):
         if is_lmdb_dir(datadir):
             # Configure LMDB dataset with appropriate reader limits
             max_readers = kwargs.get('max_readers', 126)
             dataset = LMDBDataset(datadir, max_read_depth=max_read_depth, max_readers=max_readers)
             logger.info(f"Created LMDB dataset with {len(dataset)} samples")
+            
+            # Use DistributedSampler only in distributed context, otherwise use SequentialSampler
+            if use_distributed:
+                sampler = DistributedSampler(dataset)
+                shuffle = False  # DistributedSampler handles shuffling
+            else:
+                sampler = SequentialSampler(dataset)
+                shuffle = kwargs.get('shuffle', False)
+            
             loader = DataLoader(
                 dataset, 
                 batch_size=kwargs.get('batch_size'), 
-                sampler=DistributedSampler(dataset),
-                shuffle=kwargs.get('shuffle', True), 
+                sampler=sampler,
+                shuffle=shuffle,
                 num_workers=kwargs.get('num_workers', 1),
                 pin_memory=kwargs.get('pin_memory', True),
                 drop_last=kwargs.get('drop_last', True),
@@ -415,11 +428,20 @@ def make_loader(datadir: Union[str, List[str]], **kwargs):
         total_samples = sum([len(d) for d in datasets])
         logger.info(f"Created {len(datasets)} LMDB datasets with {total_samples} samples")
         concat_dataset = torch.utils.data.ConcatDataset(datasets)
+        
+        # Use DistributedSampler only in distributed context, otherwise use SequentialSampler
+        if use_distributed:
+            sampler = DistributedSampler(concat_dataset)
+            shuffle = False  # DistributedSampler handles shuffling
+        else:
+            sampler = SequentialSampler(concat_dataset)
+            shuffle = kwargs.get('shuffle', False)
+        
         loader = DataLoader(
             concat_dataset, 
             batch_size=kwargs.get('batch_size'), 
-            sampler=DistributedSampler(concat_dataset),
-            shuffle=kwargs.get('shuffle', True), 
+            sampler=sampler,
+            shuffle=shuffle,
             num_workers=kwargs.get('num_workers', 1),
             pin_memory=kwargs.get('pin_memory', True),
             drop_last=kwargs.get('drop_last', True),
