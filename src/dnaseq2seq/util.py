@@ -508,39 +508,6 @@ class VariantSortedBuffer:
             self.put(v)
 
 
-class SortedVariantWriter:
-    """ Stores all variants in memory, then writes variants to a file in sorted order """
-
-    def __init__(self, outputfh, chrom_order=None):
-        """
-        chrom_order determines the ordering of the output chroms
-        """
-        self.outputfh = outputfh
-        self.chrom_order = chrom_order
-        self.buffer = collections.defaultdict(list) 
-
-    def put(self, v):
-        if self.chrom_order is not None and v.chrom not in self.chrom_order:
-            raise ValueError(f"Unknown chromosome: {v.chrom}")
-        self.buffer[v.chrom].append(v)
-
-    def put_all(self, items):
-        for v in items:
-            self.put(v)
-    
-    def __len__(self):
-        return sum(len(v) for v in self.buffer.values())
-    
-    def flush(self):
-        if self.chrom_order is None:
-            self.chrom_order = sorted(self.buffer.keys(), key=default_chrom_sort_key)
-        logger.info(f"Writing variants from {len(self.buffer)} chroms")
-        for chrom in self.chrom_order:
-            logger.info(f"Writing variants from {chrom}")
-            for v in sorted(self.buffer[chrom], key=lambda x: x.pos):
-                self.outputfh.write(str(v))
-            self.buffer[chrom] = []
-            self.outputfh.flush()
 
 
 class WarmupCosineLRScheduler:

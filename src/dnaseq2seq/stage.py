@@ -87,7 +87,7 @@ def _worker_run(
                     output_queue.put(result)
                     output_items_put += 1
             elif isinstance(result, SkipResult):
-                logger.info(f"Worker {worker_index} of stage {stage_name} skipping result: {result}")
+                logger.debug(f"Worker {worker_index} of stage {stage_name} skipping result: {result}")
                 with stats['lock']:
                     stats['items_skipped'] += 1
             else:

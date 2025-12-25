@@ -23,12 +23,11 @@ import pysam
 import numpy as np
 
 from dnaseq2seq.model import VarTransformer
-from dnaseq2seq import buildclf
-from dnaseq2seq import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
 from dnaseq2seq import stage
 from dnaseq2seq import hapvarcalling
+from dnaseq2seq import vcfwriter
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s '
 
@@ -159,23 +158,31 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
         make_region_encoder_func(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, batch_size, window_step), 
         n_workers=8
     )
-    variant_caller = hapvarcalling.VarHapCaller(model_path, classifier_path, refpath, bampath, max_batch_size, vcf_out, vcf_header_extras)
+    variant_caller = hapvarcalling.VarHapCaller(model_path, refpath, max_batch_size)
     variant_caller_stage = stage.Stage(
         "variant-caller", 
         variant_caller, 
         n_workers=1
     )
+    vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
+    vcf_writer_stage = stage.Stage(
+        "vcf-writer", 
+        vcf_writer, 
+        n_workers=1
+    )
     region_finder.connect(region_encoder_stage)
     region_encoder_stage.connect(variant_caller_stage)
+    variant_caller_stage.connect(vcf_writer_stage)
     region_finder.run()
     region_encoder_stage.run()  
     variant_caller_stage.run()
-
-    for i, result in enumerate(variant_caller_stage.drain()):
+    vcf_writer_stage.run()
+    
+    for i, result in enumerate(vcf_writer_stage.drain()):
         print(f"Result {i}:")
         pprint(result)
         if i % 5 == 0:
-            pprint(variant_caller_stage.get_stats())
+            pprint(vcf_writer_stage.get_stats())
     
     region_finder.join(propogate_downstream=True)
     print(f"Done encoding regions, found {i+1} regions")
