@@ -112,9 +112,7 @@ class CLSClassifier(nn.Module):
         self.cls_predictor = nn.Sequential(
             nn.Linear(embed_dim, 128),
             nn.GELU(),
-            nn.Linear(128, 64),
-            nn.GELU(),
-            nn.Linear(64, cls_output_classes)
+            nn.Linear(128, cls_output_classes)
         )
 
     def forward(self, x):
@@ -148,6 +146,9 @@ class VarTransformer(nn.Module):
         self.embed_dim = encoder_attention_heads * embed_dim_factor
         self.fc1_hidden = 12
         self.cls_classifier = CLSClassifier(self.embed_dim, cls_output_classes)
+        self.hap0_ref_classifier = CLSClassifier(self.embed_dim, 1)
+        self.hap1_ref_classifier = CLSClassifier(self.embed_dim, 1)
+        self.hap0_hap1_classifier = CLSClassifier(self.embed_dim, 1)
 
         self.fc1 = nn.Linear(feature_count, self.fc1_hidden)
         self.fc2 = nn.Linear(self.read_depth * self.fc1_hidden, self.embed_dim)
@@ -197,7 +198,10 @@ class VarTransformer(nn.Module):
 
         cls_embed = mem[:, 0, :]
         cls_pred = self.cls_classifier(cls_embed)
-        return mem, cls_pred
+        hap0_ref_pred = self.hap0_ref_classifier(cls_embed)
+        hap1_ref_pred = self.hap1_ref_classifier(cls_embed)
+        hap0_hap1_pred = self.hap0_hap1_classifier(cls_embed)
+        return mem, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred
 
     def decode(self, mem, tgt, tgt_mask, tgt_key_padding_mask=None):
         
@@ -226,8 +230,8 @@ class VarTransformer(nn.Module):
         return torch.stack((h0, h1), dim=1)
 
     def forward(self, src, tgt, tgt_mask, tgt_key_padding_mask=None):
-        mem, cls_pred = self.encode(src)
+        mem, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred = self.encode(src)
         result = self.decode(mem, tgt.float(), tgt_mask, tgt_key_padding_mask=tgt_key_padding_mask)
-        return result, cls_pred
+        return result, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred
 
 

@@ -42,12 +42,13 @@ def _worker_run(
         halt_on_exception: bool = True):
     """Worker function that processes items from input_queue and puts results in output_queue."""
     logger.info(f"Worker {worker_index} of stage {stage_name} starting")
+    abort = False
     while True:
         # Track time waiting for item from queue
         wait_start = time.time()
         try:
             item = input_queue.get(timeout=1)
-            logger.info(f"Worker {worker_index} of stage {stage_name} got item: {item}")
+            logger.debug(f"Worker {worker_index} of stage {stage_name} got item: {item}")
         except Empty:
             logger.info(f"Worker {worker_index} of stage {stage_name} empty queue, continuing")
             if should_stop.is_set():
@@ -58,6 +59,7 @@ def _worker_run(
         wait_time = time.time() - wait_start
         
         if isinstance(item, StageStopSignal):
+            abort = True
             break
 
         if isinstance(item, WorkerEndSignal):
@@ -119,7 +121,7 @@ def _worker_run(
     
     # Some stateful functions may have a few more items to put into the output queue, even
     # after the last item was pulled from the input queue
-    if hasattr(target_func, 'flush'):
+    if not abort and hasattr(target_func, 'flush'):
         result = target_func.flush()
         if isinstance(result, MultiResult):
             for result in result.results:
@@ -133,7 +135,11 @@ def _worker_run(
 
     logger.info(f"Worker {worker_index} of stage {stage_name} putting worker end signal")
     output_queue.put(WorkerEndSignal())
-    logger.info(f"Worker {worker_index} of stage {stage_name} finished")
+    logger.info(f"Worker {worker_index} of stage {stage_name} finished and waiting for workers to be released")
+
+    stats['release_workers'].wait() # Block here forever until the release_workers event is set
+    logger.info(f"Worker {worker_index} of stage {stage_name} released workers")
+
 
 
 class Stage:
@@ -162,6 +168,7 @@ class Stage:
             'worker_end_signals_expected': -1,
             'exceptions': self.manager.list(),
             'status': StageStatus.NOT_STARTED,
+            'release_workers': self.manager.Event(),
         })
         self.stats['lock'] = self.manager.Lock()
         self.workers = None
@@ -230,28 +237,45 @@ class Stage:
         
         while items_drained < self.stats['output_items_put']:
             try:
-                result = self.get(timeout=100)
+                result = self.get(timeout=10)
                 logger.info(f"Stage {self.name} draining last bits, got result: {result}")
+                logger.info(f"Items drained: {items_drained}, items processed: {self.stats['output_items_put']}")
                 if not isinstance(result, WorkerEndSignal):
                     items_drained += 1
                     yield result
             except Empty:
-                logger.info(f"Empty queue, items drained: {items_drained}, items processed: {self.stats['items_processed']}")
+                logger.info(f"Empty queue, items drained: {items_drained}, items processed: {self.stats['output_items_put']}")
                 continue
-        self.join()
         
-    def signal_stop(self):
+    def abort(self):
+        """
+        Abort this stage in the middle of processing. This will cause all workers to stop right away, even if there
+        are more items to process in the input queue.
+        This does NOT terminate or join the workers, and all workers will continue to wait until join() is called.
+        """
+        logger.info(f"Stage {self.name} aborting")
+        self.should_stop.set()
         for _ in range(self.n_workers):
             self.put(StageStopSignal())
         self.stats['status'] = StageStatus.STOPPED
 
-    def join(self):
+    def join(self, propogate_downstream: bool = False):
+        """
+        Wait for all worker processes to finish and join them. This sets the release_workers flag,
+        meaning that workers will terminate and and clear associated resources (like tensors)
+
+        If propogate_downstream is True, this will also signal the downstream stage to join, thus cascading
+        across all stages in the pipeline.
+        """
+        self.stats['release_workers'].set()
         for i, worker in enumerate(self.workers):
             if worker.is_alive():
                 logger.info(f"Joining worker {i} of stage {self.name}")
                 worker.join()
             else:
                 logger.info(f"Worker {i} of stage {self.name} is not alive, skipping, not joining it")
+        if propogate_downstream and self.downstream_stage is not None:
+            self.downstream_stage.join(propogate_downstream=propogate_downstream)
             
     def run(self):
         self._init_workers()
@@ -307,6 +331,8 @@ def _initial_worker_run(
             break
         begin_time = end_time
     output_queue.put(WorkerEndSignal())
+    stats['release_workers'].wait() # Block here forever until the release_workers event is set
+    logger.info(f"Worker {worker_index} of stage {stage_name} released workers")
 
 
 class InitialStage(Stage):
@@ -323,6 +349,7 @@ class InitialStage(Stage):
             'exceptions': self.manager.list(),
             'status': StageStatus.NOT_STARTED,
             'lock': self.manager.Lock(),
+            'release_workers': self.manager.Event(),
         })
 
     def put(self, item: Any):
