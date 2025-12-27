@@ -1,24 +1,16 @@
-import os
+
 import time
 
-import datetime
 import logging
-import string
 import random
-import traceback
-from collections import defaultdict
 from dataclasses import dataclass
 from pprint import pp, pprint
 
 from functools import partial
 from pathlib import Path
-from typing import List, Callable
-from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import torch
 import torch.multiprocessing as mp
-import queue
 import pysam
 import numpy as np
 
@@ -76,7 +68,7 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
     random.seed(seed)
 
     torch.set_num_threads(4) # Per-process ?
-    mp.set_start_method('spawn')
+    mp.set_start_method('spawn') # Spawn is safer, but slower than fork. Fork is the default on linux
     start_time = time.perf_counter()
     threads = kwargs.get('threads', 1)
     max_batch_size = kwargs.get('max_batch_size', 64)
@@ -136,55 +128,66 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     """
     Test the parallel calling function
     """
+    gpu_count = torch.cuda.device_count()
     inputbed = bed
     bampath = bam
     refpath = reference_fasta
     window_size = 150
     min_reads = 5
-    batch_size = 64
+    max_batch_size = 256
     window_step = 25
-
-    _, modelconf = hapvarcalling.load_model(model_path)
+    region_workers = 8 * gpu_count
     
+    gpu_profiler = util.GPUProfiler(gpu_index=0, interval=0.2)
+
+    logger.info(f"Loading model from {model_path}")
+    _, modelconf = hapvarcalling.load_model(model_path, 'cpu')
+    logger.info(f"Model loaded, max_read_depth: {modelconf['max_read_depth']}")
     region_finder = stage.InitialStage(
         "region-finder", 
         target_func=None, 
         iterator_factory=make_region_finder_iterator, 
         iterator_kwargs={'inputbed': inputbed, 'bampath': bampath, 'refpath': refpath}
     )
-
+    logger.info(f"Creating region encoder stage")
+    region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
     region_encoder_stage = stage.Stage(
         "region-encoder", 
-        make_region_encoder_func(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, batch_size, window_step), 
-        n_workers=8
+        region_encoder, 
+        n_workers=region_workers
     )
-    variant_caller = hapvarcalling.VarHapCaller(model_path, refpath, max_batch_size)
+    logger.info(f"Creating variant caller stage")
+    variant_caller = hapvarcalling.VarHapCaller(model_path, refpath, max_batch_size, device='cuda')
     variant_caller_stage = stage.Stage(
         "variant-caller", 
         variant_caller, 
-        n_workers=1
+        n_workers=gpu_count
     )
+    logger.info(f"Creating vcf writer stage")
     vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
     vcf_writer_stage = stage.Stage(
         "vcf-writer", 
         vcf_writer, 
         n_workers=1
     )
+    logger.info(f"Connecting stages")
     region_finder.connect(region_encoder_stage)
     region_encoder_stage.connect(variant_caller_stage)
     variant_caller_stage.connect(vcf_writer_stage)
+    logger.info(f"Running stages")
+    gpu_profiler.start()
     region_finder.run()
     region_encoder_stage.run()  
     variant_caller_stage.run()
     vcf_writer_stage.run()
-    
+
+    logger.info(f"Draining vcf writer stage")
     for i, result in enumerate(vcf_writer_stage.drain()):
-        print(f"Result {i}:")
-        pprint(result)
-        if i % 5 == 0:
-            pprint(vcf_writer_stage.get_stats())
+        pass
     
     region_finder.join(propogate_downstream=True)
+    gpu_profiler.stop()
+    
     print(f"Done encoding regions, found {i+1} regions")
     print(f"Region finder stats:")
     pprint(region_finder.get_stats())
@@ -192,45 +195,60 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     pprint(region_encoder_stage.get_stats())
     print(f"Variant caller stats:")
     pprint(variant_caller_stage.get_stats())
-    
+    print(f"VCF writer stats:")
+    pprint(vcf_writer_stage.get_stats())
+
+    from dnaseq2seq import stats_display
+    stats_display.print_stats([region_finder.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats()], stage_names=["region-finder", "region-encoder", "variant-caller", "vcf-writer"])
+    print(f"GPU profiler report:")
+    pprint(gpu_profiler.get_report())
 
 def make_region_finder_iterator(inputbed, bampath, refpath):
     return find_regions(inputbed, bampath, refpath)
 
-def make_region_encoder_func(bampath, refpath, max_read_depth: int, window_size: int, min_reads: int, batch_size: int, window_step: int):
-    return partial(encode_region, bampath=bampath, refpath=refpath, max_read_depth=max_read_depth, window_size=window_size, min_reads=min_reads, batch_size=batch_size, window_step=window_step)
 
-def encode_region(idxregion: IndexedRegion, bampath, refpath, max_read_depth: int, window_size: int, min_reads: int, batch_size: int, window_step: int):
-    """
-    Encode the reads in the given region and save the data along with the region and start offsets to a file
-    and return the absolute path of the file
-    """
-
-    logger.debug(f"Encoding region {idxregion.chrom}:{idxregion.start}-{idxregion.end}")
-    aln = pysam.AlignmentFile(bampath, reference_filename=refpath)
-    reference = pysam.FastaFile(refpath)
-    all_encoded = []
-    all_starts = []
-    for encoded_region, start_positions in _encode_region(aln, reference, idxregion.chrom, idxregion.start, idxregion.end, max_read_depth,
-                                                     window_size=window_size, min_reads=min_reads, batch_size=batch_size, window_step=window_step):
-        all_encoded.append(encoded_region)
-        all_starts.extend(start_positions)
-    logger.debug(f"Done encoding region {idxregion.chrom}:{idxregion.start}-{idxregion.end}, created {len(all_starts)} windows")
-    if len(all_encoded) > 1:
-        encoded = torch.concat(all_encoded, dim=0)
-    elif len(all_encoded) == 1:
-        encoded = all_encoded[0]
-    else:
-        logger.error(f"Uh oh, did not find any encoded paths!, region is {idxregion.chrom}:{idxregion.start}-{idxregion.end}")
-        return None
-
-    data = {
-        'encoded_pileup': encoded,
-        'region': (idxregion.chrom, idxregion.start, idxregion.end),
-        'start_positions': all_starts,
-        'index': idxregion.index,
-    }
-    return data
+class RegionEncoder:
+    def __init__(self, bampath, refpath, max_read_depth: int, window_size: int, min_reads: int, batch_size: int, window_step: int):
+        self.bampath = bampath
+        self.refpath = refpath
+        self.max_read_depth = max_read_depth
+        self.window_size = window_size
+        self.min_reads = min_reads
+        self.batch_size = batch_size
+        self.window_step = window_step
+        self.aln = None
+        self.reference = None
+    
+    def _init_files(self):
+        self.aln = pysam.AlignmentFile(self.bampath, reference_filename=self.refpath)
+        self.reference = pysam.FastaFile(self.refpath)
+        torch.set_num_threads(2)
+    
+    def __call__(self, idxregion: IndexedRegion):
+        if self.aln is None or self.reference is None:
+            self._init_files()
+        
+        all_encoded = []
+        all_starts = []
+        for encoded_region, start_positions in _encode_region(self.aln, self.reference, idxregion.chrom, idxregion.start, idxregion.end, self.max_read_depth,
+                                                     window_size=self.window_size, min_reads=self.min_reads, batch_size=self.batch_size, window_step=self.window_step):
+            all_encoded.append(encoded_region)
+            all_starts.extend(start_positions)
+        if len(all_encoded) > 1:
+            encoded = torch.concat(all_encoded, dim=0)
+        elif len(all_encoded) == 1:
+            encoded = all_encoded[0]
+        else:
+            logger.error(f"Uh oh, did not find any encoded paths!, region is {idxregion.chrom}:{idxregion.start}-{idxregion.end}")
+            return None
+        encoded.share_memory_()
+        data = {
+            'encoded_pileup': encoded,
+            'region': (idxregion.chrom, idxregion.start, idxregion.end),
+            'start_positions': all_starts,
+            'index': idxregion.index,
+        }
+        return data
 
 
 def add_ref_bases(encbases, reference, chrom, start, end, max_read_depth):
@@ -472,10 +490,14 @@ def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_siz
         logger.debug(f"Region {chrom}:{start}-{end} has only low coverage areas, not encoding data")
 
 if __name__ == "__main__":
-    model_path = "/home/22319/data/variant-transformer/variant_transformer_runs/mbig_haptnt_ff1536/mbig_haptnt_ff1536_step211_20251224_163824.pt"
+    start = time.perf_counter()
+    # model_path = "/home/22319/data/variant-transformer/variant_transformer_runs/mbig_haptnt_ff1536/mbig_haptnt_ff1536_step211_20251224_163824.pt"
+    model_path = "averaged_model.pt"
     clasifier_path = None
     bam = "/mnt/ri_share/Data/variant-transformer/gem-bams/99702111878_NA12878_S89/99702111878_NA12878_S89.cram"
     ref = "/mnt/ri_share/Data/variant-transformer/ref/human_g1k_v37_decoy_phiXAdaptr.fasta.gz"
     bed = "test.bed"
     vcf_out = "test.vcf"
     call(model_path=model_path, bam=bam, bed=bed, reference_fasta=ref, vcf_out=vcf_out, classifier_path=clasifier_path, max_batch_size=64, threads=1)
+    end = time.perf_counter()
+    print(f"Total running time of call subcommand is: {end - start :.3f} seconds")

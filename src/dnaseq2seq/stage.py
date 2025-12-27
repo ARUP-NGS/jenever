@@ -1,4 +1,4 @@
-from multiprocessing import Queue, Event, Process, Manager
+from torch.multiprocessing import Queue, Event, Process, Manager
 from typing import Callable, Dict, Any, Iterable, List
 from enum import Enum
 import time
@@ -43,6 +43,10 @@ def _worker_run(
     """Worker function that processes items from input_queue and puts results in output_queue."""
     logger.info(f"Worker {worker_index} of stage {stage_name} starting")
     abort = False
+
+    if hasattr(target_func, 'worker_init'):
+        target_func.worker_init(worker_index)
+
     while True:
         # Track time waiting for item from queue
         wait_start = time.time()
@@ -50,7 +54,7 @@ def _worker_run(
             item = input_queue.get(timeout=1)
             logger.debug(f"Worker {worker_index} of stage {stage_name} got item: {item}")
         except Empty:
-            logger.info(f"Worker {worker_index} of stage {stage_name} empty queue, continuing")
+            logger.debug(f"Worker {worker_index} of stage {stage_name} empty queue, continuing")
             if should_stop.is_set():
                 break
             else:
@@ -66,13 +70,20 @@ def _worker_run(
             with stats['lock']:
                 stats['worker_end_signals_received'] += 1
             if stats['worker_end_signals_received'] == stats['worker_end_signals_expected']:
-                logger.info(f"Worker {worker_index} of stage {stage_name} received all {stats['worker_end_signals_expected']} worker end signals, stopping stage")
+                logger.debug(f"Worker {worker_index} of stage {stage_name} received all {stats['worker_end_signals_expected']} worker end signals, stopping stage")
                 should_stop.set()
             continue
 
         with stats['lock']:
+            if stats['first_item_start'] is None:
+                raise Exception("First item start time not set")
+            if stats['first_item_time'] is None:
+                stats['first_item_time'] = time.time() - stats['first_item_start']
+            
+            stats['worker_wait_times'][worker_index] = wait_time
             stats['total_wait_time'] += wait_time
             stats['items_received'] += 1
+            stats['worker_items_received'][worker_index] += 1
         
         # Track time processing the item
         process_start = time.time()
@@ -99,6 +110,9 @@ def _worker_run(
                 stats['total_process_time'] += process_time
                 stats['items_processed'] += output_items_put
                 stats['output_items_put'] += output_items_put
+                stats['worker_process_times'][worker_index] += process_time
+                stats['worker_items_processed'][worker_index] += output_items_put
+
         except Exception as e:
             process_time = time.time() - process_start
             
@@ -133,12 +147,12 @@ def _worker_run(
             output_queue.put(result)
             output_items_put += 1
 
-    logger.info(f"Worker {worker_index} of stage {stage_name} putting worker end signal")
+    logger.debug(f"Worker {worker_index} of stage {stage_name} putting worker end signal")
     output_queue.put(WorkerEndSignal())
     logger.info(f"Worker {worker_index} of stage {stage_name} finished and waiting for workers to be released")
 
     stats['release_workers'].wait() # Block here forever until the release_workers event is set
-    logger.info(f"Worker {worker_index} of stage {stage_name} released workers")
+    logger.debug(f"Worker {worker_index} of stage {stage_name} terminating")
 
 
 
@@ -155,8 +169,12 @@ class Stage:
         self.upstream_stage = None
         
         # Create Manager for shared state
+        logger.info(f"Creating manager for stage {name}")
         self.manager = Manager()
+        logger.info(f"Manager created for stage {name}")
         self.stats = self.manager.dict({
+            'first_item_start': None, # Absolute time when the run() method is called
+            'first_item_time': None,
             'total_wait_time': 0.0,
             'total_process_time': 0.0,
             'items_received': 0, # Counts items pulled from input queue
@@ -164,12 +182,21 @@ class Stage:
             'items_skipped': 0, # Counts items skipped by target function
             'output_items_put': 0, # Counts items put into output queue
             'total_workers': n_workers,
+            'worker_wait_times': self.manager.list(),
+            'worker_process_times': self.manager.list(),
+            'worker_items_received': self.manager.list(),
+            'worker_items_processed': self.manager.list(),
             'worker_end_signals_received': 0,
             'worker_end_signals_expected': -1,
             'exceptions': self.manager.list(),
             'status': StageStatus.NOT_STARTED,
             'release_workers': self.manager.Event(),
         })
+        for i in range(n_workers):
+            self.stats['worker_wait_times'].append(0.0)
+            self.stats['worker_process_times'].append(0.0)
+            self.stats['worker_items_received'].append(0)
+            self.stats['worker_items_processed'].append(0)
         self.stats['lock'] = self.manager.Lock()
         self.workers = None
         
@@ -192,6 +219,13 @@ class Stage:
             for i in range(self.n_workers)
         ]
 
+    def run(self):
+        self._init_workers()
+        self.stats['status'] = StageStatus.RUNNING
+        self.stats['first_item_start'] = time.time()
+        for i, worker in enumerate(self.workers):
+            logger.info(f"Stage {self.name} starting worker {i}")
+            worker.start()
     @property
     def status(self) -> StageStatus:
         return self.stats['status']
@@ -223,14 +257,14 @@ class Stage:
         # First, process until we receive all the worker end signals (one from each worker on the 'upstream' stage)
         # After this, we'll know that the upstream stage isn't producing any more items
         while self.stats['worker_end_signals_received'] < self.stats['worker_end_signals_expected']:
-            logger.info(f"Stage {self.name} draining, worker end signal count: {self.stats['worker_end_signals_received']}, stage status: {self.status}")
+            logger.debug(f"Stage {self.name} draining, worker end signal count: {self.stats['worker_end_signals_received']}, stage status: {self.status}")
             try:
                 result = self.get(timeout=1)
                 if not isinstance(result, WorkerEndSignal):
                     items_drained += 1
                     yield result
             except Empty:
-                logger.info(f"Empty queue, worker end signal count: {self.stats['worker_end_signals_received']}, stage status: {self.status}")
+                logger.debug(f"Empty queue, worker end signal count: {self.stats['worker_end_signals_received']}, stage status: {self.status}")
                 continue
         
         logger.info(f"Stage {self.name} workers finished, items processed: {self.stats['items_processed']}, items received: {self.stats['items_received']}")
@@ -238,13 +272,12 @@ class Stage:
         while items_drained < self.stats['output_items_put']:
             try:
                 result = self.get(timeout=10)
-                logger.info(f"Stage {self.name} draining last bits, got result: {result}")
-                logger.info(f"Items drained: {items_drained}, items processed: {self.stats['output_items_put']}")
+                logger.debug(f"Items drained: {items_drained}, items processed: {self.stats['output_items_put']}")
                 if not isinstance(result, WorkerEndSignal):
                     items_drained += 1
                     yield result
             except Empty:
-                logger.info(f"Empty queue, items drained: {items_drained}, items processed: {self.stats['output_items_put']}")
+                logger.debug(f"Empty queue, items drained: {items_drained}, items processed: {self.stats['output_items_put']}")
                 continue
         
     def abort(self):
@@ -270,19 +303,13 @@ class Stage:
         self.stats['release_workers'].set()
         for i, worker in enumerate(self.workers):
             if worker.is_alive():
-                logger.info(f"Joining worker {i} of stage {self.name}")
+                logger.debug(f"Joining worker {i} of stage {self.name}")
                 worker.join()
             else:
-                logger.info(f"Worker {i} of stage {self.name} is not alive, skipping, not joining it")
+                logger.debug(f"Worker {i} of stage {self.name} is not alive, skipping, not joining it")
+        self.stats['status'] = StageStatus.STOPPED
         if propogate_downstream and self.downstream_stage is not None:
             self.downstream_stage.join(propogate_downstream=propogate_downstream)
-            
-    def run(self):
-        self._init_workers()
-        self.stats['status'] = StageStatus.RUNNING
-        for i, worker in enumerate(self.workers):
-            logger.info(f"Stage {self.name} starting worker {i}")
-            worker.start()
         
 
     def get_stats(self) -> Dict[str, Any]:
@@ -293,12 +320,25 @@ class Stage:
             stats_dict['exceptions'] = list(stats_dict['exceptions'])
             # Remove lock from returned dict (not serializable)
             stats_dict.pop('lock', None)
+
+            stats_dict.pop('release_workers', None)
+            stats_dict['status'] = self.status.value
             
             # Calculate derived metrics
             if stats_dict['items_received'] > 0:
                 stats_dict['avg_wait_time'] = 0.0 if stats_dict['items_received'] == 0 else stats_dict['total_wait_time'] / stats_dict['items_received']
                 stats_dict['avg_process_time'] = 0.0 if stats_dict['items_processed'] == 0 else stats_dict['total_process_time'] / stats_dict['items_processed']
             
+            for i in range(len(stats_dict['worker_wait_times'])):
+                stats_dict[f'worker_{i}_wait_time'] = stats_dict['worker_wait_times'][i]
+                stats_dict[f'worker_{i}_process_time'] = stats_dict['worker_process_times'][i]
+                stats_dict[f'worker_{i}_items_received'] = stats_dict['worker_items_received'][i]
+                stats_dict[f'worker_{i}_items_processed'] = stats_dict['worker_items_processed'][i]
+            
+            stats_dict.pop('worker_wait_times', None)
+            stats_dict.pop('worker_process_times', None)
+            stats_dict.pop('worker_items_received', None)
+            stats_dict.pop('worker_items_processed', None)
             return stats_dict
 
 
@@ -370,6 +410,8 @@ class InitialStage(Stage):
             stats_dict['exceptions'] = list(stats_dict['exceptions'])
             # Remove lock from returned dict (not serializable)
             stats_dict.pop('lock', None)
+            stats_dict.pop('release_workers', None)
+            stats_dict['status'] = self.status.value
             
             # Calculate derived metrics
             if stats_dict['items_processed'] > 0:
@@ -437,7 +479,9 @@ if __name__ == "__main__":
 
     print(f"Results: {sorted(results)}")
     print(f"Results length: {len(results)}")
-    pprint(stage.get_stats())
-    pprint(stage2.get_stats())
-    pprint(stage3.get_stats())
-    pprint(stage4.get_stats())
+    
+    # Display stats using the new helper functions
+    from dnaseq2seq.stats_display import print_stats
+    stats_list = [stage.get_stats(), stage2.get_stats(), stage3.get_stats(), stage4.get_stats()]
+    stage_names = ["Uno", "Dos", "Tres", "Cuatro"]
+    print_stats(stats_list, stage_names)

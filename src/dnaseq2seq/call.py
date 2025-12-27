@@ -138,7 +138,7 @@ def load_model(model_path):
     model.eval()
     model.to(DEVICE)
     
-    model = torch.compile(model, fullgraph=True)
+    # model = torch.compile(model, fullgraph=True)
     return model, modelconf
 
 
@@ -294,7 +294,8 @@ def call_vars_in_parallel(
     # Verify model loading, we just want to fail fast here if there's an issue
     _, modelconf = load_model(model_path)
 
-
+    gpu_profiler = util.GPUProfiler(gpu_index=0, interval=0.2)
+    gpu_profiler.start()
     with mp.Manager() as manager:
         callstate = manager.dict()
         callstate['exception'] = None
@@ -328,6 +329,10 @@ def call_vars_in_parallel(
         if callstate['exception'] is not None:
             logger.error(f"Found an exception in the calling process: {callstate['exception']}")
             raise callstate['exception']
+
+        gpu_profiler.stop()
+        print(f"GPU profiler report:")
+        print(gpu_profiler.get_report())
 
 
 def find_regions(regionq, inputbed, bampath, refpath, n_signals, show_progress, callstate):

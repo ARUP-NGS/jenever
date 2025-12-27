@@ -1,10 +1,10 @@
 import collections
+from collections import defaultdict
 import itertools
 import datetime
 import os
 import bisect
 import time
-from tkinter.constants import TRUE
 
 import torch
 import torch.nn as nn
@@ -435,6 +435,7 @@ def predict_sequence(src, model, n_output_toks, device):
             step_time = time.perf_counter()
         decode_elapsed = time.perf_counter() - encode
         logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
+
         return predictions[:, :, 1:, :], probs[:, :, 1:], cls_pred
 
 def default_chrom_sort_key(c):
@@ -584,3 +585,72 @@ class RegionProgressCounter:
         else:
             return None
 
+class SortedVariantWriter:
+    """ Stores all variants in memory, then writes variants to a file in sorted order """
+
+    def __init__(self, outputfh, chrom_order=None):
+        """
+        chrom_order determines the ordering of the output chroms
+        """
+        self.outputfh = outputfh
+        self.chrom_order = chrom_order
+        self.buffer = defaultdict(list) 
+
+    def put(self, v):
+        if self.chrom_order is not None and v.chrom not in self.chrom_order:
+            raise ValueError(f"Unknown chromosome: {v.chrom}")
+        self.buffer[v.chrom].append(v)
+
+    def put_all(self, items):
+        for v in items:
+            self.put(v)
+    
+    def __len__(self):
+        return sum(len(v) for v in self.buffer.values())
+    
+    def flush(self):
+        if self.chrom_order is None:
+            self.chrom_order = sorted(self.buffer.keys(), key=default_chrom_sort_key)
+        logger.info(f"Writing variants from {len(self.buffer)} chroms")
+        for chrom in self.chrom_order:
+            logger.info(f"Writing variants from {chrom}")
+            for v in sorted(self.buffer[chrom], key=lambda x: x.pos):
+                self.outputfh.write(str(v))
+            self.buffer[chrom] = []
+            self.outputfh.flush()
+
+import threading
+import time
+import pynvml
+
+class GPUProfiler:
+    def __init__(self, gpu_index=0, interval=0.2):
+        pynvml.nvmlInit()
+        self.handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+        self.interval = interval
+        self.utils = []
+        self.running = False
+        self.thread = None
+
+    def _monitor(self):
+        while self.running:
+            # Get utilization rates (returns % for GPU and Memory)
+            util = pynvml.nvmlDeviceGetUtilizationRates(self.handle)
+            self.utils.append(util.gpu)
+            time.sleep(self.interval)
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._monitor)
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        self.thread.join()
+        pynvml.nvmlShutdown()
+
+    def get_report(self):
+        return {
+            "avg_util": sum(self.utils) / len(self.utils),
+            "peak_util": max(self.utils),
+        }

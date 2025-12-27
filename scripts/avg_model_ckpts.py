@@ -8,39 +8,25 @@ from collections import OrderedDict
 torch.set_printoptions(precision=4, sci_mode=False, linewidth=160)
 
 
-sys.path.append("/uufs/chpc.utah.edu/common/home/u0379426/src/jovian/dnaseq2seq")
+sys.path.append("~/src/jenever/src/dnaseq2seq")
 
-from model import VarTransformer
+from dnaseq2seq.model import VarTransformer
 
-# 100M conf
-modelconf={
-    "encoder_attention_heads": 8,  # was 4
-    "decoder_attention_heads" : 10,  # was 4
-    "dim_feedforward" : 512,
-    "encoder_layers" : 10,
-    "decoder_layers" : 10,  # was 2
-    "embed_dim_factor": 160 , # was 100
-    "max_read_depth": 150,
-    "feats_per_read": 10,
-}
 
-def load_model(ckpt, modelconf=modelconf):
-    # 100M params
-    statedict = None
-    if ckpt is not None:
-        if 'model' in ckpt:
-            statedict = ckpt['model']
-            new_state_dict = {}
-            for key in statedict.keys():
-                new_key = key.replace('_orig_mod.', '')
-                new_state_dict[new_key] = statedict[key]
-            statedict = new_state_dict
-        else:
-            statedict = ckpt
-
-        if 'conf' in ckpt:
-            print(f"Found model conf AND a checkpoint with model conf - using the model params from checkpoint")
-            modelconf = ckpt['conf']
+def load_model(model_path):
+    """
+    Create the VariantTransformer model using params / config settings from the given path
+    Model is compiled with torch.compile and set to eval mode
+    :returns: VariantTransformer model with parameters loaded
+    """
+    model_info = torch.load(model_path, map_location='cpu', weights_only=False)
+    statedict = model_info['model_state_dict']
+    modelconf = model_info['conf']
+    new_state_dict = {}
+    for key in statedict.keys():
+      new_key = key.replace('_orig_mod.', '')
+      new_state_dict[new_key] = statedict[key]
+    statedict = new_state_dict
 
     model = VarTransformer(read_depth=modelconf['max_read_depth'],
                            feature_count=modelconf['feats_per_read'],
@@ -48,19 +34,19 @@ def load_model(ckpt, modelconf=modelconf):
                            n_encoder_layers=modelconf['encoder_layers'],
                            n_decoder_layers=modelconf['decoder_layers'],
                            embed_dim_factor=modelconf['embed_dim_factor'],
+                           decoder_embed_dim=modelconf['decoder_embed_dim'],
                            encoder_attention_heads=modelconf['encoder_attention_heads'],
                            decoder_attention_heads=modelconf['decoder_attention_heads'],
                            d_ff=modelconf['dim_feedforward'],
                            device='cpu')
 
-    if statedict is not None:
-        print(f"Initializing model weights from state dict")
-        model.load_state_dict(statedict)
-    
-    return model
+    model.load_state_dict(statedict, strict=False)
 
 
-def average_model_parameters(model_list):
+    return model, modelconf
+
+
+def average_model_parameters(model_list, modelconf):
     """
     Averages the parameters of the given list of models.
     All models must have the same architecture.
@@ -95,19 +81,34 @@ def average_model_parameters(model_list):
             print(f"{key}: {average_state_dict[key][0:20]}")
 
 
-    new_model = load_model(average_state_dict)
+    new_model = VarTransformer(read_depth=modelconf['max_read_depth'],
+                               feature_count=modelconf['feats_per_read'],
+                               kmer_dim=260,  # Number of possible kmers
+                               n_encoder_layers=modelconf['encoder_layers'],
+                               n_decoder_layers=modelconf['decoder_layers'],
+                               embed_dim_factor=modelconf['embed_dim_factor'],
+                               decoder_embed_dim=modelconf['decoder_embed_dim'],
+                               encoder_attention_heads=modelconf['encoder_attention_heads'],
+                               decoder_attention_heads=modelconf['decoder_attention_heads'],
+                               d_ff=modelconf['dim_feedforward'],
+                               device='cpu')
+    new_model.load_state_dict(average_state_dict, strict=False)
     return new_model
 
 
 def main(paths):
     models = []
+    modelconf = None
     for path in paths:
-        models.append(load_model(torch.load(path, map_location='cpu')))
-    avg_model = average_model_parameters(models)
+        print(f"Loading model from {path}")
+        model, modelconf = load_model(path)
+        models.append(model)
+    avg_model = average_model_parameters(models, modelconf)
 
     final = {
-        "model": avg_model.state_dict(),
+        "model_state_dict": avg_model.half().state_dict(),
         "conf": modelconf,
+
         "model_average_from": [paths]
     }
     torch.save(final, "averaged_model.pt")
