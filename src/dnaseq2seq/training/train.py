@@ -16,13 +16,13 @@ from torch.cuda.amp import GradScaler
 import torch.cuda.amp as amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from dnaseq2seq import vcf
-from dnaseq2seq import loader
+from dnaseq2seq.calling import vcf
+from dnaseq2seq.training import loader
 from dnaseq2seq import util
 from dnaseq2seq.model import VarTransformer
-from dnaseq2seq import loggers
-from dnaseq2seq.modelcheckpointer import CheckpointManager
-from dnaseq2seq.evalpreds import calc_val_accuracy, safe_compute_ppav, compute_twohap_loss
+from dnaseq2seq.training import loggers
+from dnaseq2seq.training.modelcheckpointer import CheckpointManager
+from dnaseq2seq.training.evalpreds import calc_val_accuracy, safe_compute_ppav, compute_twohap_loss
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s'
 formatter = logging.Formatter(LOG_FORMAT)
@@ -64,11 +64,17 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
     start = time.perf_counter()
     samples_perf = 0
     tn_criterion = nn.BCEWithLogitsLoss()
+    hap0_ref_criterion = nn.BCEWithLogitsLoss()
+    hap1_ref_criterion = nn.BCEWithLogitsLoss()
+    hap0_hap1_criterion = nn.BCEWithLogitsLoss()
     tn_loss_weight = 0.1
     for batch, data in enumerate(loader_iter):
         src = data["read"].float().to(DEVICE)
         tgt_kmers = data["tgkmers"].long().to(DEVICE)
         tgt_cls = data["tntgt"].float().to(DEVICE)
+        hap0_ref_match = data["hap0_ref_match"].float().to(DEVICE)
+        hap1_ref_match = data["hap1_ref_match"].float().to(DEVICE)
+        hap0_hap1_match = data["hap0_hap1_match"].float().to(DEVICE)
         logger.debug("Got batch from loader...")
         tgt_kmer_idx = torch.argmax(tgt_kmers, dim=-1)
         tgt_kmers_input = tgt_kmers[:, :, :-1]
@@ -79,13 +85,16 @@ def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_sc
         logger.debug("Forward pass...")
 
         with torch.amp.autocast(device_type='cuda', enabled=enable_amp): # dtype is bfloat16 by default
-            seq_preds, cls_pred = model(src, tgt_kmers_input, tgt_mask)
+            seq_preds, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred = model(src, tgt_kmers_input, tgt_mask)
 
             logger.debug(f"Computing loss...")
             loss, swaps = compute_twohap_loss(seq_preds, tgt_expected, criterion)
 
             tnloss = tn_criterion(cls_pred.squeeze(1), tgt_cls)
-            loss = loss + tn_loss_weight * tnloss
+            hap0_ref_loss = hap0_ref_criterion(hap0_ref_pred.squeeze(1), hap0_ref_match)
+            hap1_ref_loss = hap1_ref_criterion(hap1_ref_pred.squeeze(1), hap1_ref_match)
+            hap0_hap1_loss = hap0_hap1_criterion(hap0_hap1_pred.squeeze(1), hap0_hap1_match)
+            loss = loss + tn_loss_weight * (tnloss +  hap0_ref_loss +  hap1_ref_loss +  hap0_hap1_loss)
 
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -270,7 +279,12 @@ def train_epochs(model,
             dist.barrier()
 
             # This runs on every process, to avoid communication timeouts when there are lots of validation samples
-            acc0, acc1, var_count0, var_count1, results0, results1, val_loss, swaps, tn_prec, tn_recall, tn_f1 = calc_val_accuracy(val_loader, model, criterion, DEVICE)
+            val_metrics = calc_val_accuracy(val_loader, model, criterion, DEVICE)
+            acc0, acc1 = val_metrics["acc_hap0"], val_metrics["acc_hap1"]
+            var_count0, var_count1 = val_metrics["var_count_hap0"], val_metrics["var_count_hap1"]
+            results0, results1 = val_metrics["results_hap0"], val_metrics["results_hap1"]
+            val_loss, swaps = val_metrics["val_loss"], val_metrics["swap_count"]
+            tn_prec, tn_recall, tn_f1 = val_metrics["tn_precision"], val_metrics["tn_recall"], val_metrics["tn_f1"]
 
             ppa_dels, ppv_dels = safe_compute_ppav(results0, results1, 'del')
             ppa_ins, ppv_ins = safe_compute_ppav(results0, results1, 'ins')
@@ -313,6 +327,9 @@ def train_epochs(model,
                     "tn_stats/tn_precision": tn_prec,
                     "tn_stats/tn_recall": tn_recall,
                     "tn_stats/tn_f1": tn_f1,
+                    "tn_stats/hap0_ref_f1": val_metrics["hap0_ref_f1"],
+                    "tn_stats/hap1_ref_f1": val_metrics["hap1_ref_f1"],
+                    "tn_stats/hap0_hap1_f1": val_metrics["hap0_hap1_f1"],
                 }, step=epoch)
 
 

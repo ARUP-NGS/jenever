@@ -22,8 +22,8 @@ import pysam
 import numpy as np
 
 from dnaseq2seq.model import VarTransformer
-from dnaseq2seq import buildclf
-from dnaseq2seq import vcf
+from dnaseq2seq.calling import buildclf
+from dnaseq2seq.calling import vcf
 from dnaseq2seq import util
 from dnaseq2seq import bam
 

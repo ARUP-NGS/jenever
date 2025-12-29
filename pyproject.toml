@@ -29,6 +29,7 @@ dependencies = [
     "msgpack>=1.1.2",
     "rich>=14.2.0",
     "nvidia-ml-py>=13.590.44",
+    "torchtune>=0.6.1",
 ]
 urls = { "Homepage" = "https://github.com/ARUP-NGS/jenever" }
 

@@ -51,7 +51,7 @@ def _worker_run(
         # Track time waiting for item from queue
         wait_start = time.time()
         try:
-            item = input_queue.get(timeout=1)
+            item = input_queue.get(timeout=2)
             logger.debug(f"Worker {worker_index} of stage {stage_name} got item: {item}")
         except Empty:
             logger.debug(f"Worker {worker_index} of stage {stage_name} empty queue, continuing")
@@ -59,6 +59,10 @@ def _worker_run(
                 break
             else:
                 continue
+        except KeyboardInterrupt:
+            logger.info(f"Worker {worker_index} of stage {stage_name} received keyboard interrupt, stopping")
+            should_stop.set()
+            break
 
         wait_time = time.time() - wait_start
         
@@ -401,6 +405,15 @@ class InitialStage(Stage):
             for i in range(self.n_workers)  
         ]
     
+    def abort(self):
+        """
+        Abort this stage in the middle of processing. This will cause all workers to stop right away, even if there
+        are more items to process in the input queue.
+        This does NOT terminate or join the workers, and all workers will continue to wait until join() is called.
+        """
+        logger.info(f"Stage {self.name} aborting")
+        self.should_stop.set()
+        
     
     def get_stats(self) -> Dict[str, Any]:
         """Return a dictionary with current processing statistics."""
@@ -481,7 +494,7 @@ if __name__ == "__main__":
     print(f"Results length: {len(results)}")
     
     # Display stats using the new helper functions
-    from dnaseq2seq.stats_display import print_stats
+    from dnaseq2seq.calling.stats_display import print_stats
     stats_list = [stage.get_stats(), stage2.get_stats(), stage3.get_stats(), stage4.get_stats()]
     stage_names = ["Uno", "Dos", "Tres", "Cuatro"]
     print_stats(stats_list, stage_names)

@@ -4,9 +4,9 @@ import torch
 import torch.nn as nn
 
 from dnaseq2seq.model import VarTransformer
-from dnaseq2seq import loader
+from dnaseq2seq.training import loader
 from dnaseq2seq import util
-from dnaseq2seq.evalpreds import calc_val_accuracy, safe_compute_ppav
+from dnaseq2seq.training.evalpreds import calc_val_accuracy, safe_compute_ppav
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,11 @@ def load_model_for_eval(model_path):
     """
     logger.info(f"Loading model from {model_path}")
     model_info = torch.load(model_path, map_location=DEVICE, weights_only=False)
-    statedict = model_info['model_state_dict']
+    if 'model_state_dict' in model_info:
+        statedict = model_info['model_state_dict']
+        logger.info("Using model_state_dict")
+    else:
+        statedict = model_info['model']
     modelconf = model_info['conf']
     
     # Remove '_orig_mod.' prefix from state dict keys if present (from torch.compile)
@@ -34,7 +38,7 @@ def load_model_for_eval(model_path):
 
     logger.info(f"Loading model configuration: {modelconf}")
     model = VarTransformer(
-        read_depth=modelconf['max_read_depth'],
+        read_depth=modelconf.get('max_read_depth', 150),
         feature_count=modelconf['feats_per_read'],
         kmer_dim=util.FEATURE_DIM,
         n_encoder_layers=modelconf['encoder_layers'],
@@ -86,10 +90,12 @@ def evaluate_model(model_path, dataset_path, batch_size=64, threads=1, device=DE
     
     # Compute validation accuracy metrics
     logger.info("Computing evaluation metrics...")
-    (acc0, acc1, var_count0, var_count1, results0, results1, 
-     val_loss, swap_tot, tn_prec, tn_recall, tn_f1) = calc_val_accuracy(
-        data_loader, model, criterion, DEVICE
-    )
+    val_metrics = calc_val_accuracy(data_loader, model, criterion, DEVICE)
+    acc0, acc1 = val_metrics["acc_hap0"], val_metrics["acc_hap1"]
+    var_count0, var_count1 = val_metrics["var_count_hap0"], val_metrics["var_count_hap1"]
+    results0, results1 = val_metrics["results_hap0"], val_metrics["results_hap1"]
+    val_loss, swap_tot = val_metrics["val_loss"], val_metrics["swap_count"]
+    tn_prec, tn_recall, tn_f1 = val_metrics["tn_precision"], val_metrics["tn_recall"], val_metrics["tn_f1"]
     
     # Compute PPA and PPV for each variant type
     ppa_dels, ppv_dels = safe_compute_ppav(results0, results1, 'del')
@@ -171,3 +177,50 @@ def evaluate_model(model_path, dataset_path, batch_size=64, threads=1, device=DE
     
     print("\n" + "=" * 80)
 
+
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Evaluate a trained model on a dataset"
+    )
+    parser.add_argument(
+        "-m", "--model",
+        required=True,
+        help="Path to model checkpoint file"
+    )
+    parser.add_argument(
+        "-d", "--dataset",
+        required=True,
+        help="Path to dataset directory (LMDB or pre-generated)"
+    )
+    parser.add_argument(
+        "-b", "--batch-size",
+        type=int,
+        default=64,
+        help="Batch size for evaluation (default: 64)"
+    )
+    parser.add_argument(
+        "-t", "--threads",
+        type=int,
+        default=1,
+        help="Number of worker processes for data loading (default: 1)"
+    )
+    
+    args = parser.parse_args()
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    evaluate_model(
+        model_path=args.model,
+        dataset_path=args.dataset,
+        batch_size=args.batch_size,
+        threads=args.threads
+    )
+
+
+if __name__ == "__main__":
+    main()

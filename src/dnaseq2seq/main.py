@@ -11,7 +11,7 @@ import argparse
 import torch
 
 from dnaseq2seq import util as util
-from dnaseq2seq import loader as loader
+from dnaseq2seq.training import loader as loader
 from dnaseq2seq import __version__ as VERSION
 
 
@@ -32,11 +32,11 @@ def do_pregen(*args, **kwargs):
     pregen(*args, **kwargs)
 
 def do_call(*args, **kwargs):
-    from dnaseq2seq.call import call
+    from dnaseq2seq.calling.call import call
     call(*args, **kwargs)
 
 def do_train(*args, **kwargs):
-    from dnaseq2seq.train import train
+    from dnaseq2seq.training.train import train
     train(*args, **kwargs)
 
 def do_evaluate(*args, **kwargs):

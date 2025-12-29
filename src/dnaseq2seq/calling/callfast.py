@@ -17,13 +17,11 @@ import numpy as np
 from dnaseq2seq.model import VarTransformer
 from dnaseq2seq import util
 from dnaseq2seq import bam
-from dnaseq2seq import stage
-from dnaseq2seq import hapvarcalling
-from dnaseq2seq import vcfwriter
+from dnaseq2seq.calling import stage
+from dnaseq2seq.calling import hapvarcalling
+from dnaseq2seq.calling import vcfwriter
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s '
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -71,21 +69,11 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
     mp.set_start_method('spawn') # Spawn is safer, but slower than fork. Fork is the default on linux
     start_time = time.perf_counter()
     threads = kwargs.get('threads', 1)
-    max_batch_size = kwargs.get('max_batch_size', 64)
+    max_batch_size = kwargs.get('max_batch_size', 128)
     logger.info(f"Using {threads} threads for encoding")
-    logger.info(f"Found torch device: {DEVICE}")
+    
     # logger.info(f"Writing variants to {Path(vcf_out).absolute()}")
     
-    if 'cuda' in str(DEVICE):
-        for idev in range(torch.cuda.device_count()):
-            logger.info(f"Using CUDA device {idev} {torch.cuda.get_device_name({idev})}")
-    else:
-        logger.warning("No CUDA device found, this will be slow")
-        try:
-            torch.cuda.current_device()
-        except Exception as ex:
-            logger.error(ex)
-
     logger.info(f"The model will be loaded from path {model_path}")
 
     vcf_header_extras = kwargs.get('cmdline')
@@ -134,7 +122,7 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     refpath = reference_fasta
     window_size = 150
     min_reads = 5
-    max_batch_size = 256
+    max_batch_size = 64
     window_step = 25
     region_workers = 8 * gpu_count
     
@@ -143,49 +131,57 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     logger.info(f"Loading model from {model_path}")
     _, modelconf = hapvarcalling.load_model(model_path, 'cpu')
     logger.info(f"Model loaded, max_read_depth: {modelconf['max_read_depth']}")
-    region_finder = stage.InitialStage(
-        "region-finder", 
-        target_func=None, 
-        iterator_factory=make_region_finder_iterator, 
-        iterator_kwargs={'inputbed': inputbed, 'bampath': bampath, 'refpath': refpath}
-    )
-    logger.info(f"Creating region encoder stage")
-    region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
-    region_encoder_stage = stage.Stage(
-        "region-encoder", 
-        region_encoder, 
-        n_workers=region_workers
-    )
-    logger.info(f"Creating variant caller stage")
-    variant_caller = hapvarcalling.VarHapCaller(model_path, refpath, max_batch_size, device='cuda')
-    variant_caller_stage = stage.Stage(
-        "variant-caller", 
-        variant_caller, 
-        n_workers=gpu_count
-    )
-    logger.info(f"Creating vcf writer stage")
-    vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
-    vcf_writer_stage = stage.Stage(
-        "vcf-writer", 
-        vcf_writer, 
-        n_workers=1
-    )
-    logger.info(f"Connecting stages")
-    region_finder.connect(region_encoder_stage)
-    region_encoder_stage.connect(variant_caller_stage)
-    variant_caller_stage.connect(vcf_writer_stage)
-    logger.info(f"Running stages")
-    gpu_profiler.start()
-    region_finder.run()
-    region_encoder_stage.run()  
-    variant_caller_stage.run()
-    vcf_writer_stage.run()
+    try:
+        region_finder = stage.InitialStage(
+            "region-finder", 
+            target_func=None, 
+            iterator_factory=make_region_finder_iterator, 
+            iterator_kwargs={'inputbed': inputbed, 'bampath': bampath, 'refpath': refpath}
+        )
+        logger.info(f"Creating region encoder stage")
+        region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
+        region_encoder_stage = stage.Stage(
+            "region-encoder", 
+            region_encoder, 
+            n_workers=region_workers
+        )
+        logger.info(f"Creating variant caller stage")
+        variant_caller = hapvarcalling.VarHapCaller(model_path, refpath, max_batch_size, device='cuda')
+        variant_caller_stage = stage.Stage(
+            "variant-caller", 
+            variant_caller, 
+            n_workers=gpu_count
+        )
+        logger.info(f"Creating vcf writer stage")
+        vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
+        vcf_writer_stage = stage.Stage(
+            "vcf-writer", 
+            vcf_writer, 
+            n_workers=1
+        )
+        logger.info(f"Connecting stages")
+        region_finder.connect(region_encoder_stage)
+        region_encoder_stage.connect(variant_caller_stage)
+        variant_caller_stage.connect(vcf_writer_stage)
+        logger.info(f"Running stages")
+        gpu_profiler.start()
+        region_finder.run()
+        region_encoder_stage.run()  
+        variant_caller_stage.run()
+        vcf_writer_stage.run()
 
-    logger.info(f"Draining vcf writer stage")
-    for i, result in enumerate(vcf_writer_stage.drain()):
-        pass
-    
-    region_finder.join(propogate_downstream=True)
+        logger.info(f"Draining vcf writer stage")
+        for i, result in enumerate(vcf_writer_stage.drain()):
+            pass
+        
+        region_finder.join(propogate_downstream=True)
+    except KeyboardInterrupt:
+        logger.error("Keyboard interrupt received, stopping stages")
+        region_finder.abort()
+        region_encoder_stage.abort()
+        variant_caller_stage.abort()
+        vcf_writer_stage.abort()
+        raise KeyboardInterrupt
     gpu_profiler.stop()
     
     print(f"Done encoding regions, found {i+1} regions")
@@ -198,7 +194,7 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     print(f"VCF writer stats:")
     pprint(vcf_writer_stage.get_stats())
 
-    from dnaseq2seq import stats_display
+    from dnaseq2seq.calling import stats_display
     stats_display.print_stats([region_finder.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats()], stage_names=["region-finder", "region-encoder", "variant-caller", "vcf-writer"])
     print(f"GPU profiler report:")
     pprint(gpu_profiler.get_report())
@@ -491,10 +487,11 @@ def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_siz
 
 if __name__ == "__main__":
     start = time.perf_counter()
-    # model_path = "/home/22319/data/variant-transformer/variant_transformer_runs/mbig_haptnt_ff1536/mbig_haptnt_ff1536_step211_20251224_163824.pt"
-    model_path = "averaged_model.pt"
+    model_path = "/home/22319/data/variant-transformer/variant_transformer_runs/mbig_haptnt_ff1536/mbig_haptnt_ff1536_step211_20251224_163824.pt"
+    # model_path = "averaged_model.pt"
     clasifier_path = None
-    bam = "/mnt/ri_share/Data/variant-transformer/gem-bams/99702111878_NA12878_S89/99702111878_NA12878_S89.cram"
+    # bam = "/mnt/ri_share/Data/variant-transformer/gem-bams/99702111878_NA12878_S89/99702111878_NA12878_S89.cram"
+    bam = "/data2/brendan/99702111878_NA12878_S89.cram"
     ref = "/mnt/ri_share/Data/variant-transformer/ref/human_g1k_v37_decoy_phiXAdaptr.fasta.gz"
     bed = "test.bed"
     vcf_out = "test.vcf"

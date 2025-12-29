@@ -23,7 +23,8 @@ import torch.multiprocessing as mp
 
 from dnaseq2seq import util
 from dnaseq2seq import pregen
-from dnaseq2seq.lmdbdataset import LMDBDataset
+from dnaseq2seq.training.lmdbdataset import LMDBDataset
+from dnaseq2seq.training.varsinfodatawrapper import VarsInfoDataWrapper
 
 class ReadLoader:
     """
@@ -400,6 +401,7 @@ def make_loader(datadir: Union[str, List[str]], **kwargs):
                 sampler = SequentialSampler(dataset)
                 shuffle = kwargs.get('shuffle', False)
             
+            dataset = VarsInfoDataWrapper(dataset)
             loader = DataLoader(
                 dataset, 
                 batch_size=kwargs.get('batch_size'), 
@@ -428,6 +430,7 @@ def make_loader(datadir: Union[str, List[str]], **kwargs):
         total_samples = sum([len(d) for d in datasets])
         logger.info(f"Created {len(datasets)} LMDB datasets with {total_samples} samples")
         concat_dataset = torch.utils.data.ConcatDataset(datasets)
+        concat_dataset = VarsInfoDataWrapper(concat_dataset)
         
         # Use DistributedSampler only in distributed context, otherwise use SequentialSampler
         if use_distributed:

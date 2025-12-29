@@ -17,11 +17,11 @@ import numpy as np
 import pysam
 import torch
 
-from dnaseq2seq import call
+from dnaseq2seq.calling import call
 from dnaseq2seq import util
 from dnaseq2seq.bam import target_string_to_tensor, encode_and_downsample, ensure_dim
-from dnaseq2seq import phaser
-from dnaseq2seq import loader
+from dnaseq2seq.training import phaser
+from dnaseq2seq.training import loader
 
 logger = logging.getLogger(__name__)
 

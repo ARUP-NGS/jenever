@@ -436,7 +436,7 @@ def predict_sequence(src, model, n_output_toks, device):
         decode_elapsed = time.perf_counter() - encode
         logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
 
-        return predictions[:, :, 1:, :], probs[:, :, 1:], cls_pred
+        return predictions[:, :, 1:, :], probs[:, :, 1:], cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred
 
 def default_chrom_sort_key(c):
     c = c.replace("chr", "")
