@@ -19,7 +19,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from dnaseq2seq.calling import vcf
 from dnaseq2seq.training import loader
 from dnaseq2seq import util
-from dnaseq2seq.model import VarTransformer
+from dnaseq2seq.model import VarTransformer, NewVarTransformer
 from dnaseq2seq.training import loggers
 from dnaseq2seq.training.modelcheckpointer import CheckpointManager
 from dnaseq2seq.training.evalpreds import calc_val_accuracy, safe_compute_ppav, compute_twohap_loss
@@ -182,19 +182,35 @@ def load_model(modelconf, ckpt):
 
 
     logger.info(f"Model conf: {modelconf}")
-    model = VarTransformer(read_depth=modelconf.get('max_read_depth', 150),
-                           feature_count=modelconf['feats_per_read'],
-                           kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
-                           n_encoder_layers=modelconf['encoder_layers'],
-                           n_decoder_layers=modelconf['decoder_layers'],
-                           embed_dim_factor=modelconf['embed_dim_factor'],
-                           encoder_attention_heads=modelconf['encoder_attention_heads'],
-                           decoder_attention_heads=modelconf['decoder_attention_heads'],
-                           decoder_embed_dim=modelconf['decoder_embed_dim'],
-                           d_ff=modelconf['dim_feedforward'],
-                           device=DEVICE)
+    # model = VarTransformer(read_depth=modelconf.get('max_read_depth', 150),
+    #                        feature_count=modelconf['feats_per_read'],
+    #                        kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
+    #                        n_encoder_layers=modelconf['encoder_layers'],
+    #                        n_decoder_layers=modelconf['decoder_layers'],
+    #                        embed_dim_factor=modelconf['embed_dim_factor'],
+    #                        encoder_attention_heads=modelconf['encoder_attention_heads'],
+    #                        decoder_attention_heads=modelconf['decoder_attention_heads'],
+    #                        decoder_embed_dim=modelconf['decoder_embed_dim'],
+    #                        d_ff=modelconf['dim_feedforward'],
+    #                        device=DEVICE)
 
-    
+    model = NewVarTransformer(
+        read_depth=modelconf.get('max_read_depth', 150),
+        feature_count=modelconf['feats_per_read'],
+        encoder_embed_dim=modelconf['encoder_embed_dim'],
+        encoder_attention_heads=modelconf['encoder_attention_heads'],
+        encoder_num_kv_heads=modelconf['encoder_num_kv_heads'],
+        encoder_ff_factor=modelconf['encoder_ff_factor'],
+        decoder_embed_dim=modelconf['decoder_embed_dim'],
+        decoder_attention_heads=modelconf['decoder_attention_heads'],
+        decoder_num_kv_heads=modelconf['decoder_num_kv_heads'],
+        decoder_ff_factor=modelconf['decoder_ff_factor'],
+        kmer_dim=util.FEATURE_DIM,
+        n_encoder_layers=modelconf['encoder_layers'],
+        n_decoder_layers=modelconf['decoder_layers'],
+        cls_output_classes=1,
+        device=DEVICE,
+    )
     model_tot_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     encoder_tot_params = sum(p.numel() for p in model.encoder.parameters() if p.requires_grad)
     decoder_tot_params = 2 * sum(p.numel() for p in model.decoder0.parameters() if p.requires_grad)
@@ -259,7 +275,7 @@ def train_epochs(model,
                                 save_prefix=model_save_prefix,
                                 save_dir=model_save_dir,
                                 minimize=True,
-                                max_checkpoints=5)
+                                max_checkpoints=20)
 
     try:
         sample_iter = iter_indefinitely(dataloader)

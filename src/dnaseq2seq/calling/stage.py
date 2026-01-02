@@ -39,6 +39,7 @@ def _worker_run(
         output_queue: Queue, 
         should_stop: Event, 
         stats: Dict[str, Any],
+        custom_item_counter: Callable = None,
         halt_on_exception: bool = True):
     """Worker function that processes items from input_queue and puts results in output_queue."""
     logger.info(f"Worker {worker_index} of stage {stage_name} starting")
@@ -51,7 +52,7 @@ def _worker_run(
         # Track time waiting for item from queue
         wait_start = time.time()
         try:
-            item = input_queue.get(timeout=2)
+            item = input_queue.get(timeout=5)
             logger.debug(f"Worker {worker_index} of stage {stage_name} got item: {item}")
         except Empty:
             logger.debug(f"Worker {worker_index} of stage {stage_name} empty queue, continuing")
@@ -88,6 +89,8 @@ def _worker_run(
             stats['total_wait_time'] += wait_time
             stats['items_received'] += 1
             stats['worker_items_received'][worker_index] += 1
+            if custom_item_counter is not None:
+                stats['custom_counter'] += custom_item_counter(item)
         
         # Track time processing the item
         process_start = time.time()
@@ -162,7 +165,12 @@ def _worker_run(
 
 class Stage:
 
-    def __init__(self, name: str, target_func: Callable, n_workers: int = 1, input_queue_maxsize: int = 1000, output_queue_maxsize: int = 1000):
+    def __init__(self, name: str, 
+            target_func: Callable, 
+            n_workers: int = 1, 
+            input_queue_maxsize: int = 1000, 
+            output_queue_maxsize: int = 1000,
+            custom_item_counter: Callable = None):
         self.name = name
         self.target_func = target_func
         self.n_workers = n_workers
@@ -171,7 +179,7 @@ class Stage:
         self.should_stop = Event()
         self.downstream_stage = None
         self.upstream_stage = None
-        
+        self.custom_item_counter = custom_item_counter
         # Create Manager for shared state
         logger.info(f"Creating manager for stage {name}")
         self.manager = Manager()
@@ -195,6 +203,7 @@ class Stage:
             'exceptions': self.manager.list(),
             'status': StageStatus.NOT_STARTED,
             'release_workers': self.manager.Event(),
+            'custom_counter': 0,
         })
         for i in range(n_workers):
             self.stats['worker_wait_times'].append(0.0)
@@ -219,7 +228,7 @@ class Stage:
 
     def _init_workers(self):
         self.workers = [
-            Process(target=_worker_run, args=(self.name, i, self.target_func, self.input_queue, self.output_queue, self.should_stop, self.stats))
+            Process(target=_worker_run, args=(self.name, i, self.target_func, self.input_queue, self.output_queue, self.should_stop, self.stats, self.custom_item_counter))
             for i in range(self.n_workers)
         ]
 
@@ -354,7 +363,8 @@ def _initial_worker_run(
         should_stop: Event, 
         stats: Dict[str, Any],
         iterator_factory: Callable = None,
-        iterator_kwargs: Dict[str, Any] = None):
+        iterator_kwargs: Dict[str, Any] = None,
+        custom_item_counter: Callable = None):
     """Worker function that processes items from input_queue and puts results in output_queue."""
     logger.info(f"Worker {worker_index} of stage {stage_name} starting")
     if iterator_factory is not None:
@@ -368,7 +378,8 @@ def _initial_worker_run(
         with stats['lock']:
             stats['total_process_time'] += end_time - begin_time
             stats['items_processed'] += 1
-        
+            if custom_item_counter is not None:
+                stats['custom_counter'] += custom_item_counter(item)
         output_queue.put(item)
         if should_stop.is_set():
             logger.info(f"Worker {worker_index} of stage {stage_name} found should_stop signal, stopping")
@@ -381,11 +392,12 @@ def _initial_worker_run(
 
 class InitialStage(Stage):
 
-    def __init__(self, name: str, target_func: Iterable[Any], output_queue_maxsize: int = 1000, iterator_factory: Callable = None, iterator_kwargs: Dict[str, Any] = None):
+    def __init__(self, name: str, target_func: Iterable[Any], output_queue_maxsize: int = 1000, iterator_factory: Callable = None, iterator_kwargs: Dict[str, Any] = None, custom_item_counter: Callable = None):
         super().__init__(name, target_func, n_workers=1, input_queue_maxsize=1, output_queue_maxsize=output_queue_maxsize)
         self.input_queue = None
         self.iterator_factory = iterator_factory
         self.iterator_kwargs = iterator_kwargs
+        self.custom_item_counter = custom_item_counter
         self.stats = self.manager.dict({
             'total_process_time': 0.0,
             'items_processed': 0,
@@ -394,6 +406,7 @@ class InitialStage(Stage):
             'status': StageStatus.NOT_STARTED,
             'lock': self.manager.Lock(),
             'release_workers': self.manager.Event(),
+            'custom_counter': 0,
         })
 
     def put(self, item: Any):
@@ -401,7 +414,7 @@ class InitialStage(Stage):
 
     def _init_workers(self):
         self.workers = [
-            Process(target=_initial_worker_run, args=(self.name, i, self.target_func, self.output_queue, self.should_stop, self.stats, self.iterator_factory, self.iterator_kwargs))
+            Process(target=_initial_worker_run, args=(self.name, i, self.target_func, self.output_queue, self.should_stop, self.stats, self.iterator_factory, self.iterator_kwargs, self.custom_item_counter))
             for i in range(self.n_workers)  
         ]
     

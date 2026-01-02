@@ -127,6 +127,8 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     region_workers = 8 * gpu_count
     
     gpu_profiler = util.GPUProfiler(gpu_index=0, interval=0.2)
+    total_regions, total_bases = util.count_bed(inputbed)
+    logger.info(f"Found {total_regions} regions with {util.format_bp(total_bases)} in {inputbed}")
 
     logger.info(f"Loading model from {model_path}")
     _, modelconf = hapvarcalling.load_model(model_path, 'cpu')
@@ -134,23 +136,24 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     try:
         region_finder = stage.InitialStage(
             "region-finder", 
-            target_func=None, 
-            iterator_factory=make_region_finder_iterator, 
-            iterator_kwargs={'inputbed': inputbed, 'bampath': bampath, 'refpath': refpath}
+            target_func=RegionFinder(inputbed, bampath, refpath), 
+            custom_item_counter=region_base_pairs,
         )
         logger.info(f"Creating region encoder stage")
         region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
         region_encoder_stage = stage.Stage(
             "region-encoder", 
             region_encoder, 
-            n_workers=region_workers
+            n_workers=region_workers,
+            output_queue_maxsize=100,
         )
         logger.info(f"Creating variant caller stage")
         variant_caller = hapvarcalling.VarHapCaller(model_path, refpath, max_batch_size, device='cuda')
         variant_caller_stage = stage.Stage(
             "variant-caller", 
             variant_caller, 
-            n_workers=gpu_count
+            n_workers=gpu_count,
+            custom_item_counter=encoded_region_base_pairs,
         )
         logger.info(f"Creating vcf writer stage")
         vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
@@ -171,7 +174,15 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
         vcf_writer_stage.run()
 
         logger.info(f"Draining vcf writer stage")
+        progress = 0.0
         for i, result in enumerate(vcf_writer_stage.drain()):
+            if i % 10 == 0:
+                bp_submitted = region_finder.stats['custom_counter']
+                items_submitted = region_finder.stats['items_processed']
+                bp_called = variant_caller_stage.stats['custom_counter']
+                items_called = variant_caller_stage.stats['items_processed']
+                progress = bp_called / bp_submitted
+                logger.info(f"BP submitted: {util.format_bp(bp_submitted)}, BP called: {util.format_bp(bp_called)}, items submitted: {items_submitted}, items called: {items_called}, Progress: {progress * 100:.2f}%")
             pass
         
         region_finder.join(propogate_downstream=True)
@@ -199,9 +210,12 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     print(f"GPU profiler report:")
     pprint(gpu_profiler.get_report())
 
-def make_region_finder_iterator(inputbed, bampath, refpath):
-    return find_regions(inputbed, bampath, refpath)
 
+def region_base_pairs(idxregion: IndexedRegion):
+    return idxregion.end - idxregion.start
+    
+def encoded_region_base_pairs(encoded_region: torch.Tensor):
+    return encoded_region['region'][2] - encoded_region['region'][1]
 
 class RegionEncoder:
     def __init__(self, bampath, refpath, max_read_depth: int, window_size: int, min_reads: int, batch_size: int, window_step: int):
@@ -376,45 +390,107 @@ def cluster_positions_for_window(window, bamfile, reference_fasta, maxdist=100):
     ]
 
 
-def find_regions(inputbed, bampath, refpath):
+class RegionFinder:
     """
-    Read the input BED formatted file and merge / split the regions into big chunks
-    Then find regions that may contain a variant, and add all of these
-    to the region_queue
-    """
-    torch.set_num_threads(2) # Must be here for it to work for this process
-    region_count = 0
-    tot_size_bp = 0
-    sus_region_bp = 0
-    sus_region_count = 0
-
-    tot_regions, tot_bases = util.count_bed(inputbed)
-    logger.info(f"Found {tot_regions} regions with {util.format_bp(tot_bases)} in {inputbed}")
+    Iterable and callable class that finds regions that may contain variants.
+    Reads the input BED formatted file and merges/splits the regions into big chunks,
+    then finds regions that may contain a variant.
     
-    for idx, (chrom, window_start, window_end) in enumerate(util.split_large_regions(util.read_bed_regions(inputbed), max_region_size=10000)):
-
+    Maintains statistics as instance variables:
+        - region_count: Number of regions processed from the BED file
+        - tot_size_bp: Total base pairs processed
+        - sus_region_bp: Total base pairs in suspicious regions
+    
+    Can be used as an iterator: for region in RegionFinder(...): ...
+    Can be used as a callable: returns next IndexedRegion or StopIteration when complete.
+    """
+    
+    def __init__(self, inputbed, bampath, refpath):
+        self.inputbed = inputbed
+        self.bampath = bampath
+        self.refpath = refpath
+        self.region_count = 0
+        self.tot_size_bp = 0
+        self.sus_region_bp = 0
+        
+        # Iteration state
+        self._initialized = False
+        self._done = False
+        self._bed_iterator = None
+        self._tot_bases = 0
+        self._current_sus_regions = []
+        self._sus_region_idx = 0
+        self._current_idx = 0
+        self._current_chrom = None
+        self._sus_region_count = 0
+    
+    def _init_iteration(self):
+        """Initialize the iteration state on first call."""
+        torch.set_num_threads(2)  # Must be here for it to work for this process
+        
+        tot_regions, self._tot_bases = util.count_bed(self.inputbed)
+        logger.info(f"Found {tot_regions} regions with {util.format_bp(self._tot_bases)} in {self.inputbed}")
+        
+        self._bed_iterator = enumerate(util.split_large_regions(util.read_bed_regions(self.inputbed), max_region_size=10000))
+        self._initialized = True
+    
+    def _advance_to_next_window(self):
+        """
+        Advance to the next BED window and find suspicious regions within it.
+        Returns True if a new window was found, False if iteration is complete.
+        """
         try:
-            region_count += 1
-            tot_size_bp += window_end - window_start
-            sus_regions = cluster_positions_for_window(
-                (chrom, idx, window_start, window_end),
-                bamfile=bampath,
-                reference_fasta=refpath,
-                maxdist=100,
-            )
-            sus_regions = util.merge_overlapping_regions(sus_regions)
+            idx, (chrom, window_start, window_end) = next(self._bed_iterator)
+        except StopIteration:
+            return False
+        
+        self.region_count += 1
+        self.tot_size_bp += window_end - window_start
+        self._current_idx = idx
+        self._current_chrom = chrom
+        
+        sus_regions = cluster_positions_for_window(
+            (chrom, idx, window_start, window_end),
+            bamfile=self.bampath,
+            reference_fasta=self.refpath,
+            maxdist=100,
+        )
+        self._current_sus_regions = util.merge_overlapping_regions(sus_regions)
+        self._sus_region_idx = 0
 
-            logger.info(f"Identified regions {tot_size_bp} of {tot_bases} bp ({tot_size_bp / tot_bases * 100 :.2f} done)")
-            for i, r in enumerate(sus_regions):
-                sus_region_count += 1
-                sus_region_bp += r[-1] - r[-2]
-                yield IndexedRegion(chrom, r[-2], r[-1], idx)
+        logger.info(f"Identified regions {self.tot_size_bp} of {self._tot_bases} bp ({self.tot_size_bp / self._tot_bases * 100 :.2f} done)")
+        return True
 
-        except Exception as ex:
-            logger.error(f"Exception in region finder: {ex}")
-            raise ex
-
-    logger.info(f"Done finding regions, found {sus_region_count} regions with {util.format_bp(sus_region_bp)} bp")
+    def __iter__(self):
+        """Return self as the iterator."""
+        return self
+    
+    def __next__(self):
+        """
+        Return the next IndexedRegion, or raise StopIteration when complete.
+        """
+        if self._done:
+            raise StopIteration
+        
+        if not self._initialized:
+            self._init_iteration()
+        
+        # If we have pending suspicious regions in current window, return the next one
+        while self._sus_region_idx >= len(self._current_sus_regions):
+            # Need to advance to next window
+            if not self._advance_to_next_window():
+                # No more windows
+                self._done = True
+                logger.info(f"Done finding regions, found {self._sus_region_count} regions with {util.format_bp(self.sus_region_bp)} bp")
+                raise StopIteration
+        
+        # Return the next suspicious region
+        r = self._current_sus_regions[self._sus_region_idx]
+        self._sus_region_idx += 1
+        self._sus_region_count += 1
+        self.sus_region_bp += r[-1] - r[-2]
+        
+        return IndexedRegion(self._current_chrom, r[-2], r[-1], self._current_idx)
 
 
 def add_ref_bases(encbases, reference, chrom, start, end, max_read_depth):
@@ -487,14 +563,18 @@ def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_siz
 
 if __name__ == "__main__":
     start = time.perf_counter()
-    model_path = "/home/22319/data/variant-transformer/variant_transformer_runs/mbig_haptnt_ff1536/mbig_haptnt_ff1536_step211_20251224_163824.pt"
+    model_path = "mbig_haptnt_ff1536_averaged2.pt"
+    # model_path = "mbig_g44o20_averaged180-200.pt"
+    model_prefix = Path(model_path).stem
     # model_path = "averaged_model.pt"
     clasifier_path = None
-    # bam = "/mnt/ri_share/Data/variant-transformer/gem-bams/99702111878_NA12878_S89/99702111878_NA12878_S89.cram"
-    bam = "/data2/brendan/99702111878_NA12878_S89.cram"
+    bam = "/mnt/ri_share/Data/variant-transformer/gem-bams/99702111878_NA12878_S89/99702111878_NA12878_S89.cram"
+    # bam = "/data2/brendan/99702111878_NA12878_S89.cram"
     ref = "/mnt/ri_share/Data/variant-transformer/ref/human_g1k_v37_decoy_phiXAdaptr.fasta.gz"
     bed = "test.bed"
-    vcf_out = "test.vcf"
+    # bed = "/mnt/ri_share/Data/variant-transformer/chr21_22_valregion.bed"
+    bed_suffix = Path(bed).stem
+    vcf_out = f"{model_prefix}_NA12878_S89_{bed_suffix}.vcf"
     call(model_path=model_path, bam=bam, bed=bed, reference_fasta=ref, vcf_out=vcf_out, classifier_path=clasifier_path, max_batch_size=64, threads=1)
     end = time.perf_counter()
     print(f"Total running time of call subcommand is: {end - start :.3f} seconds")

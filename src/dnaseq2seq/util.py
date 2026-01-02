@@ -421,6 +421,7 @@ def predict_sequence(src, model, n_output_toks, device):
         predictions = torch.stack((START_TOKEN, START_TOKEN), dim=0).expand(src.shape[0], -1, -1, -1).float().to(device)
         probs = torch.zeros(src.shape[0], 2, 1).float().to(device)
         mem, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred = model.encode(src)
+        # mem, cls_pred = model.encode(src)
         encode = time.perf_counter()
         encode_elapsed = encode - start
         step_time = time.perf_counter()

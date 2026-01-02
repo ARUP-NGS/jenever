@@ -30,6 +30,9 @@ dependencies = [
     "rich>=14.2.0",
     "nvidia-ml-py>=13.590.44",
     "torchtune>=0.6.1",
+    "humanfriendly>=10.0",
+    "ipykernel>=7.1.0",
+    "torchao>=0.15.0",
 ]
 urls = { "Homepage" = "https://github.com/ARUP-NGS/jenever" }
 

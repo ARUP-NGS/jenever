@@ -33,7 +33,11 @@ def load_model(model_path, device):
     :returns: VariantTransformer model with parameters loaded
     """
     model_info = torch.load(model_path, map_location=device, weights_only=False)
-    statedict = model_info['model_state_dict']
+    if 'model_state_dict' in model_info:
+        statedict = model_info['model_state_dict']
+    else:
+        statedict = model_info['model']
+
     modelconf = model_info['conf']
     new_state_dict = {}
     for key in statedict.keys():
