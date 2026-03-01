@@ -922,7 +922,7 @@ def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, enable_amp=T
         end = min(encoded_reads.shape[0]+1, start + max_batch_size)
         logger.debug(f"Calling batch of size {end - start}")
         with torch.amp.autocast(device_type='cuda', enabled=enable_amp):
-            preds, prbs, clspred = util.predict_sequence(encoded_reads[start:end, :, :, :].to(DEVICE).float(), model,
+            preds, prbs, clspred, *_ = util.predict_sequence(encoded_reads[start:end, :, :, :].to(DEVICE).float(), model,
                                             n_output_toks=n_output_toks, device=DEVICE)
         
         clspred = clspred.squeeze(-1)
@@ -1133,3 +1133,18 @@ def resolve_haplotypes(genos):
         allvars1[v.key] = [t for t in allvars if t.key == v.key]
     return allvars0, allvars1
 
+if __name__ == "__main__":
+    from multiprocessing import Queue
+    bamfile = "/mnt/ri_share/Data/variant-transformer/gem-bams/99702111878_NA12878_S89/99702111878_NA12878_S89.cram"
+    bedfile = "perftest.bed"
+    refpath = "/mnt/ri_share/Data/variant-transformer/ref/human_g1k_v37_decoy_phiXAdaptr.fasta"
+
+    regionq = Queue()
+    callstate = dict()
+    callstate['exception'] = None
+    start_time = time.perf_counter()
+    find_regions(regionq, bedfile, bamfile, refpath, 1, True, callstate)
+    end_time = time.perf_counter()
+    elapsed_seconds = end_time - start_time
+    logger.info(f"Time taken to find regions: {elapsed_seconds :.2f} seconds")
+        

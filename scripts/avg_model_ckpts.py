@@ -11,7 +11,8 @@ torch.set_printoptions(precision=4, sci_mode=False, linewidth=160)
 sys.path.append("~/src/jenever/src/dnaseq2seq")
 
 from dnaseq2seq.model import VarTransformer
-
+from dnaseq2seq.model import NewVarTransformer
+from dnaseq2seq import util
 
 def load_model(model_path):
     """
@@ -28,18 +29,34 @@ def load_model(model_path):
       new_state_dict[new_key] = statedict[key]
     statedict = new_state_dict
 
-    model = VarTransformer(read_depth=modelconf['max_read_depth'],
-                           feature_count=modelconf['feats_per_read'],
-                           kmer_dim=260,  # Number of possible kmers
-                           n_encoder_layers=modelconf['encoder_layers'],
-                           n_decoder_layers=modelconf['decoder_layers'],
-                           embed_dim_factor=modelconf['embed_dim_factor'],
-                           decoder_embed_dim=modelconf['decoder_embed_dim'],
-                           encoder_attention_heads=modelconf['encoder_attention_heads'],
-                           decoder_attention_heads=modelconf['decoder_attention_heads'],
-                           d_ff=modelconf['dim_feedforward'],
-                           device='cpu')
-
+    # model = VarTransformer(read_depth=modelconf['max_read_depth'],
+    #                        feature_count=modelconf['feats_per_read'],
+    #                        kmer_dim=260,  # Number of possible kmers
+    #                        n_encoder_layers=modelconf['encoder_layers'],
+    #                        n_decoder_layers=modelconf['decoder_layers'],
+    #                        embed_dim_factor=modelconf['embed_dim_factor'],
+    #                        decoder_embed_dim=modelconf['decoder_embed_dim'],
+    #                        encoder_attention_heads=modelconf['encoder_attention_heads'],
+    #                        decoder_attention_heads=modelconf['decoder_attention_heads'],
+    #                        d_ff=modelconf['dim_feedforward'],
+    #                        device='cpu')
+    model = NewVarTransformer(
+        read_depth=modelconf.get('max_read_depth', 150),
+        feature_count=modelconf['feats_per_read'],
+        encoder_embed_dim=modelconf['encoder_embed_dim'],
+        encoder_attention_heads=modelconf['encoder_attention_heads'],
+        encoder_num_kv_heads=modelconf['encoder_num_kv_heads'],
+        encoder_ff_factor=modelconf['encoder_ff_factor'],
+        decoder_embed_dim=modelconf['decoder_embed_dim'],
+        decoder_attention_heads=modelconf['decoder_attention_heads'],
+        decoder_num_kv_heads=modelconf['decoder_num_kv_heads'],
+        decoder_ff_factor=modelconf['decoder_ff_factor'],
+        kmer_dim=util.FEATURE_DIM,
+        n_encoder_layers=modelconf['encoder_layers'],
+        n_decoder_layers=modelconf['decoder_layers'],
+        cls_output_classes=1,
+        device='cpu',
+    )
     model.load_state_dict(statedict, strict=False)
 
 
@@ -81,17 +98,34 @@ def average_model_parameters(model_list, modelconf):
             print(f"{key}: {average_state_dict[key][0:20]}")
 
 
-    new_model = VarTransformer(read_depth=modelconf['max_read_depth'],
-                               feature_count=modelconf['feats_per_read'],
-                               kmer_dim=260,  # Number of possible kmers
-                               n_encoder_layers=modelconf['encoder_layers'],
-                               n_decoder_layers=modelconf['decoder_layers'],
-                               embed_dim_factor=modelconf['embed_dim_factor'],
-                               decoder_embed_dim=modelconf['decoder_embed_dim'],
-                               encoder_attention_heads=modelconf['encoder_attention_heads'],
-                               decoder_attention_heads=modelconf['decoder_attention_heads'],
-                               d_ff=modelconf['dim_feedforward'],
-                               device='cpu')
+    # new_model = VarTransformer(read_depth=modelconf['max_read_depth'],
+    #                            feature_count=modelconf['feats_per_read'],
+    #                            kmer_dim=260,  # Number of possible kmers
+    #                            n_encoder_layers=modelconf['encoder_layers'],
+    #                            n_decoder_layers=modelconf['decoder_layers'],
+    #                            embed_dim_factor=modelconf['embed_dim_factor'],
+    #                            decoder_embed_dim=modelconf['decoder_embed_dim'],
+    #                            encoder_attention_heads=modelconf['encoder_attention_heads'],
+    #                            decoder_attention_heads=modelconf['decoder_attention_heads'],
+    #                            d_ff=modelconf['dim_feedforward'],
+    #                            device='cpu')
+    new_model = NewVarTransformer(
+        read_depth=modelconf.get('max_read_depth', 150),
+        feature_count=modelconf['feats_per_read'],
+        encoder_embed_dim=modelconf['encoder_embed_dim'],
+        encoder_attention_heads=modelconf['encoder_attention_heads'],
+        encoder_num_kv_heads=modelconf['encoder_num_kv_heads'],
+        encoder_ff_factor=modelconf['encoder_ff_factor'],
+        decoder_embed_dim=modelconf['decoder_embed_dim'],
+        decoder_attention_heads=modelconf['decoder_attention_heads'],
+        decoder_num_kv_heads=modelconf['decoder_num_kv_heads'],
+        decoder_ff_factor=modelconf['decoder_ff_factor'],
+        kmer_dim=util.FEATURE_DIM,
+        n_encoder_layers=modelconf['encoder_layers'],
+        n_decoder_layers=modelconf['decoder_layers'],
+        cls_output_classes=1,
+        device='cpu',
+    )
     new_model.load_state_dict(average_state_dict, strict=False)
     return new_model
 

@@ -8,9 +8,15 @@ import subprocess
 import pysam
 from pathlib import Path
 
-RUN_HAPPY="/uufs/chpc.utah.edu/common/home/u0379426/src/jovian/scripts/run_happy.sh"
 
-GIABROOT="/uufs/chpc.utah.edu/common/home/u0379426/GIAB_NISTv4.2.1_2023-10-26"
+BEDTOOLS_PATH="/home/22319/miniforge3/envs/py3/bin/bedtools"
+
+RUN_HAPPY="/home/22319/src/jenever/scripts/run_happy.sh"
+#RUN_HAPPY="/uufs/chpc.utah.edu/common/home/u0379426/src/jovian/scripts/run_happy.sh"
+
+
+GIABROOT="/mnt/ri_share/Data/variant-transformer/GIAB_NISTv4.2.1_2023-10-26"
+#GIABROOT="/uufs/chpc.utah.edu/common/home/u0379426/GIAB_NISTv4.2.1_2023-10-26"
 
 GIAB_DATA={
         "na12878_vcf": f"{GIABROOT}/vcf/HG001_GRCh37_1_22_v4.2.1_benchmark.vcf.gz",
@@ -18,6 +24,7 @@ GIAB_DATA={
         "na24385_vcf": f"{GIABROOT}/vcf/HG002_GRCh37_1_22_v4.2.1_benchmark.vcf.gz",
         "hg003_vcf": f"{GIABROOT}/vcf/HG003_GRCh37_1_22_v4.2.1_benchmark.vcf.gz",
         "hg004_vcf": f"{GIABROOT}/vcf/HG004_GRCh37_1_22_v4.2.1_benchmark.vcf.gz",
+        "hg005_vcf": f"{GIABROOT}/vcf/HG005_GRCh37_1_22_v4.2.1_benchmark.vcf.gz",
         "hg006_vcf": f"{GIABROOT}/vcf/HG006_GRCh37_1_22_v4.2.1_benchmark.vcf.gz",
         "hg007_vcf": f"{GIABROOT}/vcf/HG007_GRCh37_1_22_v4.2.1_benchmark.vcf.gz",
         "na12878_bed": f"{GIABROOT}/bed/HG001_GRCh37_1_22_v4.2.1_benchmark.bed",
@@ -25,13 +32,15 @@ GIAB_DATA={
         "hg003_bed": f"{GIABROOT}/bed/HG003_GRCh37_1_22_v4.2.1_benchmark_noinconsistent.bed",
         "hg004_bed": f"{GIABROOT}/bed/HG004_GRCh37_1_22_v4.2.1_benchmark_noinconsistent.bed",
         "na24631_bed": f"{GIABROOT}/bed/HG005_GRCh37_1_22_v4.2.1_benchmark.bed",
+        "hg005_bed": f"{GIABROOT}/bed/HG005_GRCh37_1_22_v4.2.1_benchmark.bed",
         "hg006_bed": f"{GIABROOT}/bed/HG006_GRCh37_1_22_v4.2.1_benchmark.bed",
         "hg007_bed": f"{GIABROOT}/bed/HG007_GRCh37_1_22_v4.2.1_benchmark.bed",
         }
 
 
 def find_giab(name):
-    if "NA12878" in name:
+    name = name.upper()
+    if ("NA12878" in name) or ("HG001" in name):
         return GIAB_DATA['na12878_bed'], GIAB_DATA['na12878_vcf']
     elif "GM24631" in name:
         return GIAB_DATA['na24631_bed'], GIAB_DATA['na24631_vcf']
@@ -60,14 +69,14 @@ def bed_intersect(b1, b2):
     assert b1.endswith('.bed')
     assert b2.endswith('.bed')
     outbed = "." + Path(b1).name.replace(".bed", "")[0:12] + "_" + Path(b2).name.replace(".bed", "")[0:12] + f"_{''.join(random.sample(string.ascii_letters, k=6))}.bed"
-    cmd = f"bedtools intersect -a {b1} -b {b2} > {outbed}"
+    cmd = f"{BEDTOOLS_PATH} intersect -a {b1} -b {b2} > {outbed}"
     sys.stderr.write(f"Running {cmd}\n")
     subprocess.run(cmd, shell=True, check=True)
     return outbed
 
 def sort_vcf(vcf):
     dest = Path(vcf).name.replace(".vcf", "") + "_sorted.vcf"
-    cmd = f"bedtools sort -header -i {vcf} > {dest}"
+    cmd = f"{BEDTOOLS_PATH} sort -header -i {vcf} > {dest}"
     sys.stderr.write(f"Running {cmd}\n")
     subprocess.run(cmd, shell=True, check=True)
     return dest

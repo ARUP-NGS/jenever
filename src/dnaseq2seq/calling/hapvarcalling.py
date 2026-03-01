@@ -1,6 +1,4 @@
-from this import d
 import time
-import json
 import torch
 import numpy as np
 from collections import defaultdict
@@ -11,11 +9,10 @@ import pysam
 import logging
 from dnaseq2seq import util
 from dnaseq2seq.calling import buildclf
-from dnaseq2seq.model import VarTransformer
+from dnaseq2seq.model import VarTransformer, NewVarTransformer
 from dnaseq2seq.calling import stage
 
 from dnaseq2seq.calling import vcf
-from dnaseq2seq.calling import vcfwriter
 from dnaseq2seq.calling.vcf import Variant
 
 @dataclass
@@ -46,22 +43,39 @@ def load_model(model_path, device):
     statedict = new_state_dict
 
     logger.info(f"Loading model configuration: {modelconf}")
-    model = VarTransformer(read_depth=modelconf['max_read_depth'],
-                           feature_count=modelconf['feats_per_read'],
-                           kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
-                           n_encoder_layers=modelconf['encoder_layers'],
-                           n_decoder_layers=modelconf['decoder_layers'],
-                           embed_dim_factor=modelconf['embed_dim_factor'],
-                           decoder_embed_dim=modelconf['decoder_embed_dim'],
-                           encoder_attention_heads=modelconf['encoder_attention_heads'],
-                           decoder_attention_heads=modelconf['decoder_attention_heads'],
-                           d_ff=modelconf['dim_feedforward'],
-                           device=device)
+    # model = VarTransformer(read_depth=modelconf['max_read_depth'],
+    #                        feature_count=modelconf['feats_per_read'],
+    #                        kmer_dim=util.FEATURE_DIM,  # Number of possible kmers
+    #                        n_encoder_layers=modelconf['encoder_layers'],
+    #                        n_decoder_layers=modelconf['decoder_layers'],
+    #                        embed_dim_factor=modelconf['embed_dim_factor'],
+    #                        decoder_embed_dim=modelconf['decoder_embed_dim'],
+    #                        encoder_attention_heads=modelconf['encoder_attention_heads'],
+    #                        decoder_attention_heads=modelconf['decoder_attention_heads'],
+    #                        d_ff=modelconf['dim_feedforward'],
+    #                        device=device)
 
+    model = NewVarTransformer(
+        read_depth=modelconf.get('max_read_depth', 150),
+        feature_count=modelconf['feats_per_read'],
+        encoder_embed_dim=modelconf['encoder_embed_dim'],
+        encoder_attention_heads=modelconf['encoder_attention_heads'],
+        encoder_num_kv_heads=modelconf['encoder_num_kv_heads'],
+        encoder_ff_factor=modelconf['encoder_ff_factor'],
+        decoder_embed_dim=modelconf['decoder_embed_dim'],
+        decoder_attention_heads=modelconf['decoder_attention_heads'],
+        decoder_num_kv_heads=modelconf['decoder_num_kv_heads'],
+        decoder_ff_factor=modelconf['decoder_ff_factor'],
+        kmer_dim=util.FEATURE_DIM,
+        n_encoder_layers=modelconf['encoder_layers'],
+        n_decoder_layers=modelconf['decoder_layers'],
+        cls_output_classes=1,
+        device=device,
+    )
     model.load_state_dict(statedict, strict=False)
     model.eval()
     model.to(device)
-    
+    model = torch.compile(model, mode='max-autotune')
     return model, modelconf
 
 
@@ -96,6 +110,8 @@ class VarHapCaller:
         self.set_device(torch.device(f"cuda:{worker_index}"))
 
     def __call__(self, data: Tensor):
+        if data is None:
+            return stage.SkipResult()
         data['encoded_pileup'] = data['encoded_pileup'].to(self.device)
         self.data_buffer.append(data)
         self.windows_buffered += data['encoded_pileup'].shape[0]

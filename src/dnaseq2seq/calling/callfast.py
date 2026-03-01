@@ -6,7 +6,6 @@ import random
 from dataclasses import dataclass
 from pprint import pp, pprint
 
-from functools import partial
 from pathlib import Path
 
 import torch
@@ -14,11 +13,12 @@ import torch.multiprocessing as mp
 import pysam
 import numpy as np
 
-from dnaseq2seq.model import VarTransformer
+
 from dnaseq2seq import util
 from dnaseq2seq import bam
 from dnaseq2seq.calling import stage
 from dnaseq2seq.calling import hapvarcalling
+from dnaseq2seq.calling import hapvarcalling_optimized
 from dnaseq2seq.calling import vcfwriter
 
 LOG_FORMAT  ='[%(asctime)s] %(process)d  %(name)s  %(levelname)s %(funcName)s: l.%(lineno)d  %(message)s '
@@ -122,9 +122,9 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     refpath = reference_fasta
     window_size = 150
     min_reads = 5
-    max_batch_size = 64
+    max_batch_size = 256
     window_step = 25
-    region_workers = 8 * gpu_count
+    region_workers = 12 * gpu_count
     
     gpu_profiler = util.GPUProfiler(gpu_index=0, interval=0.2)
     total_regions, total_bases = util.count_bed(inputbed)
@@ -133,57 +133,63 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     logger.info(f"Loading model from {model_path}")
     _, modelconf = hapvarcalling.load_model(model_path, 'cpu')
     logger.info(f"Model loaded, max_read_depth: {modelconf['max_read_depth']}")
-    try:
-        region_finder = stage.InitialStage(
-            "region-finder", 
-            target_func=RegionFinder(inputbed, bampath, refpath), 
-            custom_item_counter=region_base_pairs,
-        )
-        logger.info(f"Creating region encoder stage")
-        region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
-        region_encoder_stage = stage.Stage(
-            "region-encoder", 
-            region_encoder, 
-            n_workers=region_workers,
-            output_queue_maxsize=100,
-        )
-        logger.info(f"Creating variant caller stage")
-        variant_caller = hapvarcalling.VarHapCaller(model_path, refpath, max_batch_size, device='cuda')
-        variant_caller_stage = stage.Stage(
-            "variant-caller", 
-            variant_caller, 
-            n_workers=gpu_count,
-            custom_item_counter=encoded_region_base_pairs,
-        )
-        logger.info(f"Creating vcf writer stage")
-        vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
-        vcf_writer_stage = stage.Stage(
-            "vcf-writer", 
-            vcf_writer, 
-            n_workers=1
-        )
-        logger.info(f"Connecting stages")
-        region_finder.connect(region_encoder_stage)
-        region_encoder_stage.connect(variant_caller_stage)
-        variant_caller_stage.connect(vcf_writer_stage)
-        logger.info(f"Running stages")
-        gpu_profiler.start()
-        region_finder.run()
-        region_encoder_stage.run()  
-        variant_caller_stage.run()
-        vcf_writer_stage.run()
+    
+    region_finder = stage.InitialStage(
+        "region-finder", 
+        target_func=RegionFinder(inputbed, bampath, refpath), 
+        custom_item_counter=region_base_pairs,
+    )
+    logger.info(f"Creating region encoder stage")
+    region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
+    region_encoder_stage = stage.Stage(
+        "region-encoder", 
+        region_encoder, 
+        n_workers=region_workers,
+        stats_update_interval=1,
+    )
+    region_finder.connect(region_encoder_stage)
+    region_finder.run()
 
-        logger.info(f"Draining vcf writer stage")
-        progress = 0.0
+    logger.info(f"Creating variant caller stage")
+    variant_caller = hapvarcalling_optimized.OptimizedVarHapCaller(model_path, refpath, max_batch_size, device='cuda', enable_double_buffering=False, use_pinned_memory=False)
+    variant_caller_stage = stage.Stage(
+        "variant-caller", 
+        variant_caller, 
+        n_workers=gpu_count,
+        custom_item_counter=encoded_region_base_pairs,
+        stats_update_interval=1,
+    )
+    region_encoder_stage.connect(variant_caller_stage)
+    region_encoder_stage.run()
+
+    logger.info(f"Creating vcf writer stage")
+    vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
+    vcf_writer_stage = stage.Stage(
+        "vcf-writer", 
+        vcf_writer, 
+        n_workers=1,
+        stats_update_interval=1,
+    )
+    variant_caller_stage.connect(vcf_writer_stage)
+    variant_caller_stage.run()
+    vcf_writer_stage.run()
+    
+    gpu_profiler.start()
+    
+    progress = 0.0
+    try:
         for i, result in enumerate(vcf_writer_stage.drain()):
-            if i % 10 == 0:
+            if i % 20 == 0:
                 bp_submitted = region_finder.stats['custom_counter']
-                items_submitted = region_finder.stats['items_processed']
+                regions_identified = region_finder.stats['items_processed']
+                regions_encoded = region_encoder_stage.stats['items_processed']
                 bp_called = variant_caller_stage.stats['custom_counter']
-                items_called = variant_caller_stage.stats['items_processed']
+                items_called = variant_caller_stage.stats['items_received']
                 progress = bp_called / bp_submitted
-                logger.info(f"BP submitted: {util.format_bp(bp_submitted)}, BP called: {util.format_bp(bp_called)}, items submitted: {items_submitted}, items called: {items_called}, Progress: {progress * 100:.2f}%")
-            pass
+                encoded_queue_length = regions_identified -regions_encoded
+                calling_queue_length = regions_encoded - items_called
+                logger.info(f"Iter {i} BP submitted: {util.format_bp(bp_submitted)}, BP called: {util.format_bp(bp_called)}, Regions identified: {regions_identified}, Regions encoded: {regions_encoded}, Items called: {items_called}, Progress: {progress * 100:.2f}%")
+                logger.info(f"Encoded queue length: {encoded_queue_length}, Calling queue length: {calling_queue_length}")
         
         region_finder.join(propogate_downstream=True)
     except KeyboardInterrupt:
@@ -212,9 +218,13 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
 
 
 def region_base_pairs(idxregion: IndexedRegion):
+    if idxregion is None:
+        return 0
     return idxregion.end - idxregion.start
     
 def encoded_region_base_pairs(encoded_region: torch.Tensor):
+    if encoded_region is None:
+        return 0
     return encoded_region['region'][2] - encoded_region['region'][1]
 
 class RegionEncoder:
@@ -330,7 +340,7 @@ def _encode_region(aln, reference, chrom: str, start: int, end: int, max_read_de
         logger.debug(f"Region {chrom}:{start}-{end} has only low coverage areas, not encoding data")
 
 
-def gen_suspicious_spots(bamfile, chrom, start, stop, reference_fasta):
+def gen_suspicious_spots(aln, chrom, start, stop, ref):
     """
     Generator for positions of a BAM / CRAM file that may contain a variant. This should be pretty sensitive and
     trigger on anything even remotely like a variant
@@ -342,8 +352,6 @@ def gen_suspicious_spots(bamfile, chrom, start, stop, reference_fasta):
     :param stop: End position of region (exclusive)
     :param reference_fasta: Reference sequences in fasta
     """
-    aln = pysam.AlignmentFile(bamfile, reference_filename=reference_fasta)
-    ref = pysam.FastaFile(reference_fasta)
     refseq = ref.fetch(chrom, start, stop)
     assert len(refseq) == stop - start, f"Ref sequence length doesn't match start - stop coords start: {chrom}:{start}-{stop}, ref len: {len(refseq)}"
     for col in aln.pileup(chrom, start=start, stop=stop, stepper='nofilter', multiple_iterators=False):
@@ -369,7 +377,7 @@ def gen_suspicious_spots(bamfile, chrom, start, stop, reference_fasta):
 
 
 
-def cluster_positions_for_window(window, bamfile, reference_fasta, maxdist=100):
+def cluster_positions_for_window(window, aln, ref, maxdist=100):
     """
     Generate a list of ranges containing a list of positions from the given window
     returns: list of (chrom, index, start, end) tuples
@@ -384,7 +392,7 @@ def cluster_positions_for_window(window, bamfile, reference_fasta, maxdist=100):
     return [
         (chrom, window_idx, start, end)
         for start, end in util.cluster_positions(
-            gen_suspicious_spots(bamfile, chrom, window_start, window_end, reference_fasta),
+            gen_suspicious_spots(aln, chrom, window_start, window_end, ref),
             maxdist=maxdist,
         )
     ]
@@ -423,6 +431,8 @@ class RegionFinder:
         self._current_idx = 0
         self._current_chrom = None
         self._sus_region_count = 0
+        self.aln = None
+        self.ref = None
     
     def _init_iteration(self):
         """Initialize the iteration state on first call."""
@@ -432,6 +442,8 @@ class RegionFinder:
         logger.info(f"Found {tot_regions} regions with {util.format_bp(self._tot_bases)} in {self.inputbed}")
         
         self._bed_iterator = enumerate(util.split_large_regions(util.read_bed_regions(self.inputbed), max_region_size=10000))
+        self.aln = pysam.AlignmentFile(self.bampath, reference_filename=self.refpath)
+        self.ref = pysam.FastaFile(self.refpath)
         self._initialized = True
     
     def _advance_to_next_window(self):
@@ -451,8 +463,8 @@ class RegionFinder:
         
         sus_regions = cluster_positions_for_window(
             (chrom, idx, window_start, window_end),
-            bamfile=self.bampath,
-            reference_fasta=self.refpath,
+            aln=self.aln,
+            ref=self.ref,
             maxdist=100,
         )
         self._current_sus_regions = util.merge_overlapping_regions(sus_regions)
@@ -564,6 +576,7 @@ def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_siz
 if __name__ == "__main__":
     start = time.perf_counter()
     model_path = "mbig_haptnt_ff1536_averaged2.pt"
+    # model_path = "med_gqamodel_g44o20_averaged.pt"
     # model_path = "mbig_g44o20_averaged180-200.pt"
     model_prefix = Path(model_path).stem
     # model_path = "averaged_model.pt"
@@ -571,7 +584,12 @@ if __name__ == "__main__":
     bam = "/mnt/ri_share/Data/variant-transformer/gem-bams/99702111878_NA12878_S89/99702111878_NA12878_S89.cram"
     # bam = "/data2/brendan/99702111878_NA12878_S89.cram"
     ref = "/mnt/ri_share/Data/variant-transformer/ref/human_g1k_v37_decoy_phiXAdaptr.fasta.gz"
-    bed = "test.bed"
+    bed = "perftest.bed"
+
+    # regionfinder = RegionFinder(bed, bam, ref)
+    # for region in regionfinder:
+    #     print(region)
+    
     # bed = "/mnt/ri_share/Data/variant-transformer/chr21_22_valregion.bed"
     bed_suffix = Path(bed).stem
     vcf_out = f"{model_prefix}_NA12878_S89_{bed_suffix}.vcf"

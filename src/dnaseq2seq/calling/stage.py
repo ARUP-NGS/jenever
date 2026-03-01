@@ -59,7 +59,9 @@ def _worker_run(
 
     # Local counters - much faster than shared state
     local_items_received = 0
-    local_items_processed = 0
+    # Track total processed for display, and a batch counter for periodic shared syncs.
+    local_items_processed_total = 0
+    local_items_processed_batch = 0
     local_total_wait_time = 0.0
     local_total_process_time = 0.0
     local_custom_counter = 0
@@ -125,20 +127,21 @@ def _worker_run(
                 output_queue.put(result)
                 output_items_put += 1
 
-            local_items_processed += output_items_put
+            local_items_processed_total += output_items_put
+            local_items_processed_batch += output_items_put
             items_since_last_sync += 1
 
             # Periodically sync local stats to shared state (reduces lock contention dramatically)
             if items_since_last_sync >= stats_update_interval:
                 # Update atomic counters (lock-free for simple operations)
                 shared_counters['items_received'].value += items_since_last_sync
-                shared_counters['items_processed'].value += local_items_processed
+                shared_counters['items_processed'].value += local_items_processed_batch
                 shared_counters['custom_counter'].value += local_custom_counter
                 
                 # Update per-worker stats (each worker writes only to its own slot)
                 worker_stats_list[worker_index] = {
                     'items_received': local_items_received,
-                    'items_processed': local_items_processed,
+                    'items_processed': local_items_processed_total,
                     'total_wait_time': local_total_wait_time,
                     'total_process_time': local_total_process_time,
                     'items_skipped': local_items_skipped,
@@ -147,7 +150,7 @@ def _worker_run(
                 # Reset batch counters
                 items_since_last_sync = 0
                 local_custom_counter = 0
-                local_items_processed = 0
+                local_items_processed_batch = 0
 
         except Exception as e:
             process_time = time.time() - process_start
@@ -176,17 +179,18 @@ def _worker_run(
             output_queue.put(result)
             flush_items_produced += 1
         
-        local_items_processed += flush_items_produced
+        local_items_processed_total += flush_items_produced
+        local_items_processed_batch += flush_items_produced
 
     # Final sync of remaining local stats (including any items from flush)
-    if items_since_last_sync > 0 or flush_items_produced > 0:
+    if items_since_last_sync > 0 or local_items_processed_batch > 0 or flush_items_produced > 0:
         shared_counters['items_received'].value += items_since_last_sync
-        shared_counters['items_processed'].value += local_items_processed
+        shared_counters['items_processed'].value += local_items_processed_batch
         shared_counters['custom_counter'].value += local_custom_counter
     
     worker_stats_list[worker_index] = {
         'items_received': local_items_received,
-        'items_processed': local_items_processed, 
+        'items_processed': local_items_processed_total,
         'total_wait_time': local_total_wait_time,
         'total_process_time': local_total_process_time,
         'items_skipped': local_items_skipped,
@@ -304,43 +308,63 @@ class Stage:
 
     @property
     def stats(self) -> Dict[str, Any]:
-        """Property for compatibility with existing code that accesses stage.stats"""
-        return {
+        """
+        Property for compatibility with existing code that accesses stage.stats.
+
+        Historically, callers expected this to include per-worker keys (e.g.
+        `worker_4_items_processed`) for rich worker displays. We keep this cheap
+        enough for polling loops, but include the latest per-worker snapshots.
+        """
+        stats: Dict[str, Any] = {
+            'total_workers': self.n_workers,
             'items_processed': self.shared_counters['items_processed'].value,
             'items_received': self.shared_counters['items_received'].value,
             'custom_counter': self.shared_counters['custom_counter'].value,
         }
 
+        # Per-worker snapshots (best-effort: workers update their own slot periodically).
+        for i, ws in enumerate(self.worker_stats_list):
+            if not ws:
+                continue
+            stats[f'worker_{i}_items_received'] = ws.get('items_received', 0)
+            stats[f'worker_{i}_items_processed'] = ws.get('items_processed', 0)
+            stats[f'worker_{i}_wait_time'] = ws.get('total_wait_time', 0.0)
+            stats[f'worker_{i}_process_time'] = ws.get('total_process_time', 0.0)
+            stats[f'worker_{i}_items_skipped'] = ws.get('items_skipped', 0)
+
+        return stats
+
     def drain(self):
-        """Preferred method for obtaining all results."""
-        items_drained = 0
-        expected_signals = self.shared_counters['worker_end_signals_expected'].value
-        if expected_signals == -1:
-            raise Exception("Upstream worker count not set")
+        """
+        Drain results from this stage's *output* queue until all of this stage's workers have
+        emitted their terminal `WorkerEndSignal()`.
         
-        while self.shared_counters['worker_end_signals_received'].value < expected_signals:
+        Note: `shared_counters['worker_end_signals_*']` tracks *upstream* end signals received
+        on this stage's input queue (used to stop workers). It must not be used to decide when
+        downstream consumers are done draining this stage's outputs, otherwise we can stop
+        consuming too early and leave the worker blocked during interpreter shutdown while its
+        queue feeder thread tries to flush pending output.
+        """
+        items_drained = 0
+        end_signals_seen = 0
+        expected_end_signals = self.n_workers
+
+        while end_signals_seen < expected_end_signals:
             try:
                 result = self.get(timeout=1)
-                if not isinstance(result, WorkerEndSignal):
-                    logger.info(f"Stage {self.name} drained items {items_drained}, worker end signals received {self.shared_counters['worker_end_signals_received'].value}, worker end signals expected {self.shared_counters['worker_end_signals_expected'].value}")
-                    items_drained += 1
-                    yield result
             except Empty:
                 continue
-        
-        logger.info(f"Stage {self.name} workers finished")
-        
-        # Drain remaining items
-        total_processed = self.shared_counters['items_processed'].value
-        while items_drained < total_processed:
-            try:
-                result = self.get(timeout=10)
-                if not isinstance(result, WorkerEndSignal):
-                    logger.info(f"Stage {self.name} drained items: {items_drained} processed items: {total_processed}")
-                    items_drained += 1
-                    yield result
-            except Empty:
+
+            if isinstance(result, WorkerEndSignal):
+                end_signals_seen += 1
+                logger.info(
+                    f"Stage {self.name} received worker end signal "
+                    f"{end_signals_seen}/{expected_end_signals}"
+                )
                 continue
+
+            items_drained += 1
+            yield result
 
     def abort(self):
         logger.info(f"Stage {self.name} aborting")
@@ -368,16 +392,19 @@ class Stage:
         # Aggregate per-worker stats
         total_wait_time = 0.0
         total_process_time = 0.0
+        total_items_skipped = 0
         worker_details = {}
         
         for i, ws in enumerate(self.worker_stats_list):
             if ws:
                 total_wait_time += ws.get('total_wait_time', 0.0)
                 total_process_time += ws.get('total_process_time', 0.0)
+                total_items_skipped += ws.get('items_skipped', 0)
                 worker_details[f'worker_{i}_items_received'] = ws.get('items_received', 0)
                 worker_details[f'worker_{i}_items_processed'] = ws.get('items_processed', 0)
                 worker_details[f'worker_{i}_wait_time'] = ws.get('total_wait_time', 0.0)
                 worker_details[f'worker_{i}_process_time'] = ws.get('total_process_time', 0.0)
+                worker_details[f'worker_{i}_items_skipped'] = ws.get('items_skipped', 0)
         
         items_received = self.shared_counters['items_received'].value
         items_processed = self.shared_counters['items_processed'].value
@@ -387,6 +414,7 @@ class Stage:
             'total_workers': self.n_workers,
             'items_received': items_received,
             'items_processed': items_processed,
+            'items_skipped': total_items_skipped,
             'custom_counter': self.shared_counters['custom_counter'].value,
             'total_wait_time': total_wait_time,
             'total_process_time': total_process_time,

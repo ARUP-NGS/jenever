@@ -5,7 +5,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchtune.modules import TransformerDecoder, TransformerSelfAttentionLayer, TransformerCrossAttentionLayer, MultiHeadAttention, FeedForward
+from torchtune.modules import TransformerDecoder, TransformerSelfAttentionLayer, TransformerCrossAttentionLayer, MultiHeadAttention, FeedForward, KVCache
 import numpy as np
 import math
 
@@ -318,6 +318,22 @@ class TransformerDecoderLayer(nn.Module):
             mlp_norm=nn.LayerNorm(embed_dim),
         )
     
+    def setup_caches(self, batch_size, dtype, *, encoder_max_seq_len, decoder_max_seq_len):
+        self.self_attention_layer.setup_caches(
+            batch_size, dtype,
+            encoder_max_seq_len=encoder_max_seq_len,
+            decoder_max_seq_len=decoder_max_seq_len,
+        )
+        self.cross_attention_layer.setup_caches(
+            batch_size, dtype,
+            encoder_max_seq_len=encoder_max_seq_len,
+            decoder_max_seq_len=decoder_max_seq_len,
+        )
+
+    def reset_cache(self):
+        self.self_attention_layer.reset_cache()
+        self.cross_attention_layer.reset_cache()
+
     def forward(self, x, encoder_input, mask=None, encoder_mask=None):
         x = self.self_attention_layer(x, mask=mask)
         x = self.cross_attention_layer(x, encoder_input=encoder_input, encoder_mask=encoder_mask)
@@ -331,7 +347,19 @@ class TransformerDecoderStack(nn.Module):
             TransformerDecoderLayer(embed_dim, num_heads, num_kv_heads, dropout, ff_factor)
             for _ in range(num_layers)
         ])
-    
+
+    def setup_caches(self, batch_size, dtype, *, encoder_max_seq_len, decoder_max_seq_len):
+        for layer in self.layers:
+            layer.setup_caches(
+                batch_size, dtype,
+                encoder_max_seq_len=encoder_max_seq_len,
+                decoder_max_seq_len=decoder_max_seq_len,
+            )
+
+    def reset_cache(self):
+        for layer in self.layers:
+            layer.reset_cache()
+
     def forward(self, x, encoder_input, mask=None, encoder_mask=None):
         for layer in self.layers:
             x = layer(x, encoder_input, mask=mask, encoder_mask=encoder_mask)
@@ -474,6 +502,82 @@ class NewVarTransformer(nn.Module):
         mem, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred = self.encode(src)
         result = self.decode(mem, tgt.float(), tgt_mask)
         return result, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred
+
+    def _setup_kv_caches(self, batch_size, max_decode_len, encoder_seq_len, dtype, device):
+        """Create fresh KV caches for cached autoregressive decoding.
+
+        Each decoder layer gets a self-attention cache (sized for the decode
+        sequence) and a cross-attention cache (sized for the encoder sequence).
+        """
+        for decoder in [self.decoder0, self.decoder1]:
+            for layer in decoder.layers:
+                sa = layer.self_attention_layer.attn
+                sa.kv_cache = KVCache(
+                    batch_size=batch_size,
+                    max_seq_len=max_decode_len,
+                    num_kv_heads=sa.num_kv_heads,
+                    head_dim=sa.head_dim,
+                    dtype=dtype,
+                ).to(device)
+                sa.cache_enabled = True
+
+                ca = layer.cross_attention_layer.attn
+                ca.kv_cache = KVCache(
+                    batch_size=batch_size,
+                    max_seq_len=encoder_seq_len,
+                    num_kv_heads=ca.num_kv_heads,
+                    head_dim=ca.head_dim,
+                    dtype=dtype,
+                ).to(device)
+                ca.cache_enabled = True
+
+    def _teardown_kv_caches(self):
+        """Remove KV caches to return the model to normal (non-cached) mode."""
+        for decoder in [self.decoder0, self.decoder1]:
+            for layer in decoder.layers:
+                layer.self_attention_layer.attn.kv_cache = None
+                layer.self_attention_layer.attn.cache_enabled = False
+                layer.cross_attention_layer.attn.kv_cache = None
+                layer.cross_attention_layer.attn.cache_enabled = False
+
+    def decode_step(self, mem_proj, tgt_token, step, sa_mask):
+        """Decode a single token at the given step position using KV cache.
+
+        With KV cache enabled, self-attention K/V are accumulated automatically
+        and cross-attention K/V are populated on step 0 then reused.
+
+        Args:
+            mem_proj: Pre-projected encoder memory [batch, enc_seq, decoder_embed_dim].
+                      Consumed on step 0 to populate cross-attention caches.
+            tgt_token: Current token(s) [batch, 2, 1, kmer_dim].
+            step: 0-based position index of this token in the output sequence.
+            sa_mask: Boolean self-attention mask [1, 1, max_decode_len] that is
+                     True for valid (filled) cache positions and False for
+                     unfilled positions.
+
+        Returns:
+            Log-probabilities tensor [batch, 2, 1, kmer_dim].
+        """
+        pe = self.tgt_pos_encoder.pe[:, step:step+1, :]
+        tgt0 = tgt_token[:, 0, :, :] + pe
+        tgt1 = tgt_token[:, 1, :, :] + pe
+
+        tgt0 = self.tgt_input_converter(tgt0)
+        tgt1 = self.tgt_input_converter(tgt1)
+
+        # On step 0 pass encoder memory so cross-attention caches are filled;
+        # on subsequent steps pass None to reuse the cached encoder K/V.
+        encoder_input = mem_proj if step == 0 else None
+
+        h0 = self.decoder0(tgt0, encoder_input, mask=sa_mask)
+        h1 = self.decoder1(tgt1, encoder_input, mask=sa_mask)
+
+        h0 = self.decode_output_converter0(h0)
+        h1 = self.decode_output_converter1(h1)
+
+        h0 = self.softmax(h0)
+        h1 = self.softmax(h1)
+        return torch.stack((h0, h1), dim=1)
 
 
 if __name__ == "__main__":

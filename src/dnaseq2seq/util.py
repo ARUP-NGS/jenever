@@ -418,24 +418,54 @@ def predict_sequence(src, model, n_output_toks, device):
         if isinstance(model, nn.DataParallel) or isinstance(model, DistributedDataParallel):
             model = model.module
         start = time.perf_counter()
-        predictions = torch.stack((START_TOKEN, START_TOKEN), dim=0).expand(src.shape[0], -1, -1, -1).float().to(device)
-        probs = torch.zeros(src.shape[0], 2, 1).float().to(device)
+        batch = src.shape[0]
+        total_seq_len = n_output_toks + 2  # 1 start token + n_output_toks + 1
+
+        # Pre-allocate output tensors to avoid repeated concat / reallocation
+        predictions = torch.zeros(batch, 2, total_seq_len, FEATURE_DIM, device=device)
+        predictions[:, :, 0:1, :] = torch.stack((START_TOKEN, START_TOKEN), dim=0).expand(batch, -1, -1, -1).float().to(device)
+        probs = torch.zeros(batch, 2, total_seq_len, device=device)
+
         mem, cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred = model.encode(src)
-        # mem, cls_pred = model.encode(src)
         encode = time.perf_counter()
         encode_elapsed = encode - start
+
+        use_kv_cache = hasattr(model, 'decode_step')
+
+        if use_kv_cache:
+            mem_proj = model.converter(mem)
+            model._setup_kv_caches(
+                batch, total_seq_len, mem.shape[1],
+                dtype=torch.float16, device=device,
+            )
+            # Precompute causal mask for self-attention over the KV cache buffer.
+            # Shape [total_seq_len, total_seq_len]; at step i we take row i to get
+            # a [1, total_seq_len] mask that is True for filled positions 0..i.
+            cache_positions = torch.arange(total_seq_len, device=device)
+            causal_mask = cache_positions.unsqueeze(0) <= cache_positions.unsqueeze(1)  # [S, S]
+        else:
+            full_mask = nn.Transformer.generate_square_subsequent_mask(total_seq_len).to(device)
+
         step_time = time.perf_counter()
         for i in range(n_output_toks + 1):
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(predictions.shape[-2]).to(device)
-            new_preds = model.decode(mem, predictions, tgt_mask=tgt_mask)[:, :, -1:, :]
+            if use_kv_cache:
+                sa_mask = causal_mask[i:i+1, :].unsqueeze(0)  # [1, 1, total_seq_len]
+                new_preds = model.decode_step(mem_proj, predictions[:, :, i:i+1, :], step=i, sa_mask=sa_mask)
+            else:
+                seq_len = i + 1
+                tgt_mask = full_mask[:seq_len, :seq_len]
+                new_preds = model.decode(mem, predictions[:, :, :seq_len, :], tgt_mask=tgt_mask)[:, :, -1:, :]
             new_probs, tophit = torch.max(new_preds, dim=-1)
-            p = torch.nn.functional.one_hot(tophit, num_classes=FEATURE_DIM)
-            predictions = torch.concat((predictions, p), dim=2)
-            probs = torch.concat((probs, new_probs), dim=-1)
+            predictions[:, :, i+1:i+2, :] = torch.nn.functional.one_hot(tophit, num_classes=FEATURE_DIM)
+            probs[:, :, i+1:i+2] = new_probs
             logger.debug(f"Prediction step {i} time: {time.perf_counter() - step_time :.5f}")
             step_time = time.perf_counter()
+
+        if use_kv_cache:
+            model._teardown_kv_caches()
+
         decode_elapsed = time.perf_counter() - encode
-        logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f}")
+        logger.debug(f"Encoding time: {encode_elapsed :.3f} n_toks: {n_output_toks}, decoding time: {decode_elapsed :.3f} (kv_cache={use_kv_cache})")
 
         return predictions[:, :, 1:, :], probs[:, :, 1:], cls_pred, hap0_ref_pred, hap1_ref_pred, hap0_hap1_pred
 

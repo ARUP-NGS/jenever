@@ -32,7 +32,7 @@ def do_pregen(*args, **kwargs):
     pregen(*args, **kwargs)
 
 def do_call(*args, **kwargs):
-    from dnaseq2seq.calling.call import call
+    from dnaseq2seq.calling.callfast import call
     call(*args, **kwargs)
 
 def do_train(*args, **kwargs):

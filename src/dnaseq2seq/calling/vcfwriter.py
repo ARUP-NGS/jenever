@@ -156,6 +156,7 @@ class VCFWriter:
         return stage.MultiResult(serialized_records)
     
     def flush(self):
+        logger.info(f"VCFWriter flushing and closing file handle")
         self.writer.flush()
         self.vcf_out_fh.close()
         return stage.SkipResult()
