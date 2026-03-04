@@ -13,6 +13,23 @@ logger = logging.getLogger(__name__)
 
 FEATURE_NUM=10
 
+# Lookup table: ASCII byte value -> one-hot column index for base encoding.
+# -1 = gap/unknown (leave as zeros), -2 = N (set columns 0:4 to 1)
+_BASE_COL_LUT = np.full(256, -1, dtype=np.int8)
+_BASE_COL_LUT[ord('A')] = 0
+_BASE_COL_LUT[ord('C')] = 1
+_BASE_COL_LUT[ord('G')] = 2
+_BASE_COL_LUT[ord('T')] = 3
+_BASE_COL_LUT[ord('a')] = 0
+_BASE_COL_LUT[ord('c')] = 1
+_BASE_COL_LUT[ord('g')] = 2
+_BASE_COL_LUT[ord('t')] = 3
+_BASE_COL_LUT[ord('N')] = -2
+_BASE_COL_LUT[ord('n')] = -2
+
+_REF_CONSUMED_OPS = frozenset({0, 2, 4, 5, 7})
+_SEQ_CONSUMED_OPS = frozenset({0, 1, 3, 4, 7})
+_CLIPPED_OPS = frozenset({4, 5})
 
 
 class LowReadCountException(Exception):
@@ -38,7 +55,8 @@ class ReadCache:
     def __getitem__(self, read):
         key = readkey(read)
         if key not in self.cache:
-            self.cache[key] = (alnstart(read), encode_read(read))
+            # self.cache[key] = (alnstart(read), encode_read(read))
+            self.cache[key] = (alnstart(read), encode_read_vectorized(read))
 
         return self.cache[key][1]
 
@@ -59,6 +77,30 @@ class ReadCache:
             return item.query_name in self.cache
         else:
             return False
+
+
+class ReadCacheFast:
+    """
+    Read cache that stores encodings as NumPy int8 arrays via the vectorized encoder.
+    Avoids per-read torch tensor creation; all torch conversion happens once in
+    ReadWindowFast.get_window.
+    """
+
+    def __init__(self):
+        self.cache = {}
+
+    def __getitem__(self, read):
+        key = readkey(read)
+        if key not in self.cache:
+            self.cache[key] = (alnstart(read), encode_read_to_numpy(read))
+        return self.cache[key][1]
+
+    def clear_to_pos(self, min_pos):
+        newcache = {}
+        for key, val in self.cache.items():
+            if val[0] >= min_pos:
+                newcache[key] = val
+        self.cache = newcache
 
 
 class ReadWindow:
@@ -113,6 +155,66 @@ class ReadWindow:
             t[t_start_offset:t_end_offset, i, :] = encoded[enc_start_offset:enc_end_offset]
 
         return t
+
+
+class ReadWindowFast:
+    """
+    Drop-in replacement for ReadWindow that keeps all intermediate data in NumPy
+    and only converts to torch once at the end of get_window. Uses ReadCacheFast
+    (numpy-cached vectorized read encodings) and assembles the output window as a
+    NumPy array, avoiding per-read torch tensor creation and torch slice copies.
+    """
+
+    def __init__(self, aln, chrom, start, end, min_mq=-1):
+        self.aln = aln
+        self.start = start
+        self.end = end
+        self.margin_size = 150
+        self.chrom = chrom
+        self.min_mq = min_mq
+        self.cache = ReadCacheFast()
+        self.bypos = self._fill()
+
+    def _fill(self):
+        bypos = defaultdict(list)
+        for i, read in enumerate(self.aln.fetch(self.chrom, self.start - self.margin_size, self.end)):
+            if read is not None and read.mapping_quality > self.min_mq:
+                bypos[alnstart(read)].append(read)
+        return bypos
+
+    def get_window(self, start, end, max_reads, downsample_read_count=None):
+        assert self.start <= start < self.end, f"Start coordinate must be between beginning and end of window"
+        assert self.start < end <= self.end, f"End coordinate must be between beginning and end of window"
+        allreads = []
+        for pos in range(start - self.margin_size, end):
+            for read in self.bypos[pos]:
+                if pos > end or (pos + read.query_length) < start:
+                    continue
+                allreads.append((pos, read))
+        if len(allreads) < 5:
+            raise LowReadCountException(f"Only {len(allreads)} reads in window")
+
+        if downsample_read_count:
+            num_reads_to_sample = downsample_read_count
+        else:
+            num_reads_to_sample = max_reads
+
+        if len(allreads) > num_reads_to_sample:
+            logger.debug(f"Window has {len(allreads)}, downsampling to {num_reads_to_sample}")
+            allreads = random.sample(allreads, num_reads_to_sample)
+            allreads = sorted(allreads, key=lambda x: x[0])
+
+        window_size = end - start
+        t = np.zeros((window_size, max_reads, 10), dtype=np.int8)
+        for i, (readstart, read) in enumerate(allreads):
+            encoded = self.cache[read]
+            enc_start_offset = max(0, start - readstart)
+            enc_end_offset = min(encoded.shape[0], window_size - (readstart - start))
+            t_start_offset = max(0, readstart - start)
+            t_end_offset = t_start_offset + (enc_end_offset - enc_start_offset)
+            t[t_start_offset:t_end_offset, i, :] = encoded[enc_start_offset:enc_end_offset]
+
+        return torch.from_numpy(t)
 
 
 def encode_read(read, prepad=0, tot_length=None):
@@ -194,6 +296,87 @@ def decode(t):
 
 def string_to_tensor(bases):
     return torch.vstack([encode_basecall(b, 50, 0, 0, 0, 0, 50) for b in bases])
+
+
+def encode_read_to_numpy(read):
+    """
+    Encode a pysam read into a (n_bases, 10) int8 NumPy array using vectorized
+    operations instead of per-base Python iteration. This is the core implementation
+    shared by encode_read_vectorized (torch output) and ReadCacheFast (numpy output).
+    """
+    seq = read.query_sequence
+    quals = read.query_qualities
+    n = len(seq)
+    result = np.zeros((n, 10), dtype=np.int8)
+
+    seq_bytes = np.frombuffer(seq.encode('ascii'), dtype=np.uint8)
+    col_indices = _BASE_COL_LUT[seq_bytes]
+
+    normal_mask = col_indices >= 0
+    rows_normal = np.where(normal_mask)[0]
+    result[rows_normal, col_indices[rows_normal]] = 1
+
+    n_mask = col_indices == -2
+    if np.any(n_mask):
+        result[n_mask, 0:4] = 1
+
+    quals_arr = np.array(quals, dtype=np.float32)
+    result[:, 4] = np.round(quals_arr / 10.0).astype(np.int8)
+
+    cigtups = read.cigartuples or [(0, n)]
+    pos = 0
+    for cigop, length in cigtups:
+        if pos >= n:
+            break
+        end = min(pos + length, n)
+        if cigop in _REF_CONSUMED_OPS:
+            result[pos:end, 5] = 1
+        if cigop in _SEQ_CONSUMED_OPS:
+            result[pos:end, 6] = 1
+        if cigop in _CLIPPED_OPS:
+            result[pos:end, 8] = 1
+        pos = end
+
+    if read.is_reverse:
+        result[:, 7] = 1
+    result[:, 9] = int(round(read.mapping_quality / 10))
+
+    return result
+
+
+def encode_read_vectorized(read):
+    """
+    Vectorized replacement for encode_read(read) (no-prepad, no-tot_length case).
+    Returns an identical (n_bases, 10) int8 tensor using NumPy array operations
+    instead of per-base Python iteration.
+    """
+    return torch.from_numpy(encode_read_to_numpy(read))
+
+
+def string_to_tensor_vectorized(bases):
+    """
+    Vectorized replacement for string_to_tensor(). Encodes a reference base string
+    into an (n_bases, 10) int8 tensor without per-base Python iteration.
+    Hardcoded qual=50 and mapq=50 to match string_to_tensor() behavior.
+    """
+    n = len(bases)
+    result = np.zeros((n, 10), dtype=np.int8)
+
+    seq_bytes = np.frombuffer(bases.encode('ascii'), dtype=np.uint8)
+    col_indices = _BASE_COL_LUT[seq_bytes]
+
+    normal_mask = col_indices >= 0
+    rows_normal = np.where(normal_mask)[0]
+    result[rows_normal, col_indices[rows_normal]] = 1
+
+    n_mask = col_indices == -2
+    if np.any(n_mask):
+        result[n_mask, 0:4] = 1
+
+    result[:, 4] = 5  # round(50 / 10)
+    result[:, 9] = 5  # round(50 / 10)
+
+    return torch.from_numpy(result)
 
 
 def target_string_to_tensor(bases):

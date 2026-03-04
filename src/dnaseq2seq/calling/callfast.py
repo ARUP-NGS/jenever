@@ -124,7 +124,8 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     min_reads = 5
     max_batch_size = 256
     window_step = 25
-    region_workers = 12 * gpu_count
+    region_finder_workers = 2
+    region_encoder_workers = 12 * gpu_count
     
     gpu_profiler = util.GPUProfiler(gpu_index=0, interval=0.2)
     total_regions, total_bases = util.count_bed(inputbed)
@@ -134,21 +135,33 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     _, modelconf = hapvarcalling.load_model(model_path, 'cpu')
     logger.info(f"Model loaded, max_read_depth: {modelconf['max_read_depth']}")
     
-    region_finder = stage.InitialStage(
-        "region-finder", 
-        target_func=RegionFinder(inputbed, bampath, refpath), 
+    bed_chunker_stage = stage.InitialStage(
+        "bed-chunker",
+        target_func=BedChunker(inputbed),
         custom_item_counter=region_base_pairs,
     )
-    logger.info(f"Creating region encoder stage")
+
+    logger.info(f"Creating region finder stage with {region_finder_workers} workers")
+    region_finder_stage = stage.Stage(
+        "region-finder",
+        RegionFinderWorker(bampath, refpath),
+        n_workers=region_finder_workers,
+        custom_item_counter=region_base_pairs,
+        stats_update_interval=1,
+    )
+    bed_chunker_stage.connect(region_finder_stage)
+    bed_chunker_stage.run()
+
+    logger.info(f"Creating region encoder stage with {region_encoder_workers} workers")
     region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
     region_encoder_stage = stage.Stage(
         "region-encoder", 
         region_encoder, 
-        n_workers=region_workers,
+        n_workers=region_encoder_workers,
         stats_update_interval=1,
     )
-    region_finder.connect(region_encoder_stage)
-    region_finder.run()
+    region_finder_stage.connect(region_encoder_stage)
+    region_finder_stage.run()
 
     logger.info(f"Creating variant caller stage")
     variant_caller = hapvarcalling_optimized.OptimizedVarHapCaller(model_path, refpath, max_batch_size, device='cuda', enable_double_buffering=False, use_pinned_memory=False)
@@ -179,22 +192,25 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     progress = 0.0
     try:
         for i, result in enumerate(vcf_writer_stage.drain()):
-            if i % 20 == 0:
-                bp_submitted = region_finder.stats['custom_counter']
-                regions_identified = region_finder.stats['items_processed']
+            if i % 50 == 0:
+                bp_chunked = bed_chunker_stage.stats['custom_counter']
+                regions_identified = region_finder_stage.stats['items_processed']
+                bp_identified = region_finder_stage.stats['custom_counter']
                 regions_encoded = region_encoder_stage.stats['items_processed']
                 bp_called = variant_caller_stage.stats['custom_counter']
                 items_called = variant_caller_stage.stats['items_received']
-                progress = bp_called / bp_submitted
-                encoded_queue_length = regions_identified -regions_encoded
+                progress = bp_called / bp_chunked if bp_chunked > 0 else 0.0
+                finder_queue_length = bed_chunker_stage.stats['items_processed'] - region_finder_stage.stats['items_received']
+                encoded_queue_length = regions_identified - regions_encoded
                 calling_queue_length = regions_encoded - items_called
-                logger.info(f"Iter {i} BP submitted: {util.format_bp(bp_submitted)}, BP called: {util.format_bp(bp_called)}, Regions identified: {regions_identified}, Regions encoded: {regions_encoded}, Items called: {items_called}, Progress: {progress * 100:.2f}%")
-                logger.info(f"Encoded queue length: {encoded_queue_length}, Calling queue length: {calling_queue_length}")
+                logger.info(f"Iter {i} BP chunked: {util.format_bp(bp_chunked)}, BP identified: {util.format_bp(bp_identified)}, BP called: {util.format_bp(bp_called)}, Regions identified: {regions_identified}, Regions encoded: {regions_encoded}, Items called: {items_called}, Progress: {progress * 100:.2f}%")
+                logger.info(f"Finder queue: {finder_queue_length}, Encoder queue: {encoded_queue_length}, Caller queue: {calling_queue_length}")
         
-        region_finder.join(propogate_downstream=True)
+        bed_chunker_stage.join(propogate_downstream=True)
     except KeyboardInterrupt:
         logger.error("Keyboard interrupt received, stopping stages")
-        region_finder.abort()
+        bed_chunker_stage.abort()
+        region_finder_stage.abort()
         region_encoder_stage.abort()
         variant_caller_stage.abort()
         vcf_writer_stage.abort()
@@ -202,8 +218,10 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     gpu_profiler.stop()
     
     print(f"Done encoding regions, found {i+1} regions")
+    print(f"Bed chunker stats:")
+    pprint(bed_chunker_stage.get_stats())
     print(f"Region finder stats:")
-    pprint(region_finder.get_stats())
+    pprint(region_finder_stage.get_stats())
     print(f"Region encoder stats:")
     pprint(region_encoder_stage.get_stats())
     print(f"Variant caller stats:")
@@ -212,7 +230,9 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     pprint(vcf_writer_stage.get_stats())
 
     from dnaseq2seq.calling import stats_display
-    stats_display.print_stats([region_finder.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats()], stage_names=["region-finder", "region-encoder", "variant-caller", "vcf-writer"])
+    all_stats = [bed_chunker_stage.get_stats(), region_finder_stage.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats()]
+    all_names = ["bed-chunker", "region-finder", "region-encoder", "variant-caller", "vcf-writer"]
+    stats_display.print_stats(all_stats, stage_names=all_names)
     print(f"GPU profiler report:")
     pprint(gpu_profiler.get_report())
 
@@ -305,7 +325,7 @@ def _encode_region(aln, reference, chrom: str, start: int, end: int, max_read_de
     window_start = int(start - 0.7 * window_size)  # We start with regions a bit upstream of the focal / target region
     batch = []
     batch_offsets = []
-    readwindow = bam.ReadWindow(aln, chrom, start - 150, end + window_size)
+    readwindow = bam.ReadWindowFast(aln, chrom, start - 150, end + window_size)
     logger.debug(f"Encoding region {chrom}:{start}-{end}")
     returned_count = 0
     while window_start <= (end - 0.2 * window_size):
@@ -398,111 +418,65 @@ def cluster_positions_for_window(window, aln, ref, maxdist=100):
     ]
 
 
-class RegionFinder:
+class BedChunker:
     """
-    Iterable and callable class that finds regions that may contain variants.
-    Reads the input BED formatted file and merges/splits the regions into big chunks,
-    then finds regions that may contain a variant.
-    
-    Maintains statistics as instance variables:
-        - region_count: Number of regions processed from the BED file
-        - tot_size_bp: Total base pairs processed
-        - sus_region_bp: Total base pairs in suspicious regions
-    
-    Can be used as an iterator: for region in RegionFinder(...): ...
-    Can be used as a callable: returns next IndexedRegion or StopIteration when complete.
+    Iterable that reads a BED file, splits large regions into ~10kb chunks,
+    and yields BedChunk items in genome order. Designed for use as the
+    target_func of an InitialStage.
     """
-    
-    def __init__(self, inputbed, bampath, refpath):
+
+    def __init__(self, inputbed, max_region_size=10000):
         self.inputbed = inputbed
+        self.max_region_size = max_region_size
+
+    def __iter__(self):
+        for idx, (chrom, start, end) in enumerate(
+            util.split_large_regions(util.read_bed_regions(self.inputbed), max_region_size=self.max_region_size)
+        ):
+            yield IndexedRegion(chrom=chrom, start=start, end=end, index=idx)
+
+
+class RegionFinderWorker:
+    """
+    Callable that takes a BedChunk and finds suspicious regions within it
+    using pileup-based variant detection. Returns a MultiResult of
+    IndexedRegion objects, or SkipResult if no suspicious regions are found.
+
+    Opens BAM/reference file handles lazily on first invocation so each
+    worker process gets its own handles.
+    """
+
+    def __init__(self, bampath, refpath):
         self.bampath = bampath
         self.refpath = refpath
-        self.region_count = 0
-        self.tot_size_bp = 0
-        self.sus_region_bp = 0
-        
-        # Iteration state
-        self._initialized = False
-        self._done = False
-        self._bed_iterator = None
-        self._tot_bases = 0
-        self._current_sus_regions = []
-        self._sus_region_idx = 0
-        self._current_idx = 0
-        self._current_chrom = None
-        self._sus_region_count = 0
         self.aln = None
         self.ref = None
-    
-    def _init_iteration(self):
-        """Initialize the iteration state on first call."""
-        torch.set_num_threads(2)  # Must be here for it to work for this process
-        
-        tot_regions, self._tot_bases = util.count_bed(self.inputbed)
-        logger.info(f"Found {tot_regions} regions with {util.format_bp(self._tot_bases)} in {self.inputbed}")
-        
-        self._bed_iterator = enumerate(util.split_large_regions(util.read_bed_regions(self.inputbed), max_region_size=10000))
+
+    def _init_files(self):
+        torch.set_num_threads(2)
         self.aln = pysam.AlignmentFile(self.bampath, reference_filename=self.refpath)
         self.ref = pysam.FastaFile(self.refpath)
-        self._initialized = True
-    
-    def _advance_to_next_window(self):
-        """
-        Advance to the next BED window and find suspicious regions within it.
-        Returns True if a new window was found, False if iteration is complete.
-        """
-        try:
-            idx, (chrom, window_start, window_end) = next(self._bed_iterator)
-        except StopIteration:
-            return False
-        
-        self.region_count += 1
-        self.tot_size_bp += window_end - window_start
-        self._current_idx = idx
-        self._current_chrom = chrom
-        
+
+    def __call__(self, chunk: IndexedRegion):
+        if self.aln is None or self.ref is None:
+            self._init_files()
+
         sus_regions = cluster_positions_for_window(
-            (chrom, idx, window_start, window_end),
+            (chunk.chrom, chunk.index, chunk.start, chunk.end),
             aln=self.aln,
             ref=self.ref,
             maxdist=100,
         )
-        self._current_sus_regions = util.merge_overlapping_regions(sus_regions)
-        self._sus_region_idx = 0
+        merged = util.merge_overlapping_regions(sus_regions)
 
-        logger.info(f"Identified regions {self.tot_size_bp} of {self._tot_bases} bp ({self.tot_size_bp / self._tot_bases * 100 :.2f} done)")
-        return True
+        if not merged:
+            return stage.SkipResult()
 
-    def __iter__(self):
-        """Return self as the iterator."""
-        return self
-    
-    def __next__(self):
-        """
-        Return the next IndexedRegion, or raise StopIteration when complete.
-        """
-        if self._done:
-            raise StopIteration
-        
-        if not self._initialized:
-            self._init_iteration()
-        
-        # If we have pending suspicious regions in current window, return the next one
-        while self._sus_region_idx >= len(self._current_sus_regions):
-            # Need to advance to next window
-            if not self._advance_to_next_window():
-                # No more windows
-                self._done = True
-                logger.info(f"Done finding regions, found {self._sus_region_count} regions with {util.format_bp(self.sus_region_bp)} bp")
-                raise StopIteration
-        
-        # Return the next suspicious region
-        r = self._current_sus_regions[self._sus_region_idx]
-        self._sus_region_idx += 1
-        self._sus_region_count += 1
-        self.sus_region_bp += r[-1] - r[-2]
-        
-        return IndexedRegion(self._current_chrom, r[-2], r[-1], self._current_idx)
+        results = [
+            IndexedRegion(chunk.chrom, r[-2], r[-1], chunk.index)
+            for r in merged
+        ]
+        return stage.MultiResult(results)
 
 
 def add_ref_bases(encbases, reference, chrom, start, end, max_read_depth):
@@ -586,9 +560,9 @@ if __name__ == "__main__":
     ref = "/mnt/ri_share/Data/variant-transformer/ref/human_g1k_v37_decoy_phiXAdaptr.fasta.gz"
     bed = "perftest.bed"
 
-    # regionfinder = RegionFinder(bed, bam, ref)
-    # for region in regionfinder:
-    #     print(region)
+    # chunker = BedChunker(bed)
+    # for chunk in chunker:
+    #     print(chunk)
     
     # bed = "/mnt/ri_share/Data/variant-transformer/chr21_22_valregion.bed"
     bed_suffix = Path(bed).stem

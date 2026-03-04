@@ -39,6 +39,10 @@ def do_train(*args, **kwargs):
     from dnaseq2seq.training.train import train
     train(*args, **kwargs)
 
+def do_distill(*args, **kwargs):
+    from dnaseq2seq.training.distill import distill
+    distill(*args, **kwargs)
+
 def do_evaluate(*args, **kwargs):
     from dnaseq2seq.evaluate import evaluate_model
     del kwargs['func']
@@ -138,6 +142,24 @@ def main():
     trainparser.add_argument("--notes", type=str, default=None,
                              help="Run notes, longer description of run (like 'git commit -m')")
     trainparser.set_defaults(func=do_train)
+
+    distillparser = subparser.add_parser("distill", help="Distill a student model from a teacher model")
+    distillparser.add_argument("-c", "--config", help="Configuration yaml", required=False)
+    distillparser.add_argument("-o", "--output-model", help="Save distilled student state dict here", required=True)
+    distillparser.add_argument("-ch", "--checkpoint-freq", help="Save model checkpoints frequency (0 to disable)", type=int)
+    distillparser.add_argument("-lr", "--learning-rate", help="Initial learning rate", default=None, type=float)
+    distillparser.add_argument("-s", "--samples-per-epoch", help="Number of samples to process before emitting stats", type=int, default=None)
+    distillparser.add_argument("-d", "--datadir", help="Pregenerated data dir", default=None)
+    distillparser.add_argument("-vd", "--val-dir", help="Pregenerated data for validation", default=None)
+    distillparser.add_argument("-t", "--threads", help="Max number of threads to use for decompression", default=None, type=int)
+    distillparser.add_argument("-b", "--batch-size", help="The batch size", type=int, default=None)
+    distillparser.add_argument("-rn", "--run-name", type=alphanumeric_no_spaces, default=None,
+                               help="Run name, must be alphanumeric plus '_' or '-'")
+    distillparser.add_argument("--temperature", type=float, default=None,
+                               help="Distillation temperature (default 3.0)")
+    distillparser.add_argument("--alpha", type=float, default=None,
+                               help="Weight of supervised loss vs distillation loss (default 0.5)")
+    distillparser.set_defaults(func=do_distill)
 
     callparser = subparser.add_parser("call", help="Call variants")
     callparser.add_argument("-m", "--model-path", help="Stored model", required=True)

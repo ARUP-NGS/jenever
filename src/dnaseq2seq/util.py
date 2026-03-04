@@ -577,6 +577,23 @@ class WarmupCosineLRScheduler:
         self.last_lr = lr
         return lr
 
+class ConstantLRScheduler:
+    def __init__(self, lr):
+        self.lr = lr
+        self.iters = 0
+
+    def add_iters(self, iters):
+        self.iters += iters
+
+    def get_lr(self):
+        return self.lr
+    
+    def get_last_lr(self):
+        return self.lr
+
+    def set_iters(self, iters):
+        self.iters = iters
+
 class RegionProgressCounter:
 
     def __init__(self, bed):

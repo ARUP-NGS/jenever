@@ -438,7 +438,7 @@ def make_loader(datadir: Union[str, List[str]], **kwargs):
             shuffle = False  # DistributedSampler handles shuffling
         else:
             sampler = SequentialSampler(concat_dataset)
-            shuffle = kwargs.get('shuffle', False)
+            shuffle = None
         
         loader = DataLoader(
             concat_dataset, 

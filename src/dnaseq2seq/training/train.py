@@ -12,8 +12,6 @@ from pygit2 import Repository
 import torch
 from torch import nn
 import torch.distributed as dist
-from torch.cuda.amp import GradScaler
-import torch.cuda.amp as amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from dnaseq2seq.calling import vcf
@@ -53,14 +51,13 @@ else:
     experiment = None
 
 
-def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False):
+def train_n_samples(model, optimizer, criterion, loader_iter, num_samples, lr_schedule=None, enable_amp=False, scaler=None):
     """
     Train until we've seen more than 'num_samples' from the loader, then return the loss
     """
     samples_seen = 0
     loss_sum = 0
     model.train()
-    scaler = torch.amp.GradScaler('cuda', enabled=enable_amp)
     start = time.perf_counter()
     samples_perf = 0
     tn_criterion = nn.BCEWithLogitsLoss()
@@ -254,6 +251,7 @@ def train_epochs(model,
                  model_dest=None,
                  xtra_checkpoint_items={},
                  samples_per_epoch=10000,
+                 scaler_state_dict=None,
 ):
 
 
@@ -277,6 +275,10 @@ def train_epochs(model,
                                 minimize=True,
                                 max_checkpoints=20)
 
+    scaler = torch.amp.GradScaler('cuda', enabled=True)
+    if scaler_state_dict is not None:
+        scaler.load_state_dict(scaler_state_dict)
+        logger.info("Restored GradScaler state from checkpoint")
     try:
         sample_iter = iter_indefinitely(dataloader)
         for epoch in range(epochs):
@@ -288,7 +290,8 @@ def train_epochs(model,
                               sample_iter,
                               samples_per_epoch,
                               scheduler,
-                              enable_amp=True)
+                              enable_amp=True,
+                              scaler=scaler)
 
             elapsed = datetime.now() - starttime
 
@@ -350,12 +353,12 @@ def train_epochs(model,
 
 
             if MASTER_PROCESS and epoch > -1:
-                checkpointer.step(value=val_loss, step=epoch, conf=xtra_checkpoint_items, opt=optimizer.state_dict())
+                checkpointer.step(value=val_loss, step=epoch, conf=xtra_checkpoint_items, opt=optimizer.state_dict(), scaler=scaler.state_dict())
                 
             dist.barrier()
         logger.info(f"Training completed after {epoch} epochs")
     except KeyboardInterrupt:
-        checkpointer.step(value=val_loss, step=epoch, conf=xtra_checkpoint_items, opt=optimizer.state_dict())
+        checkpointer.step(value=val_loss, step=epoch, conf=xtra_checkpoint_items, opt=optimizer.state_dict(), scaler=scaler.state_dict())
 
 
 
@@ -531,6 +534,8 @@ def train(output_model, **kwargs):
         lr_decay_iters=kwargs.get('lr_decay_iters', 20e6),
     )
 
+    scaler_state_dict = ckpt.get('scaler') if ckpt is not None else None
+
     train_epochs(model,
                  optimizer,
                  kwargs.get('epochs'),
@@ -541,5 +546,6 @@ def train(output_model, **kwargs):
                  checkpoint_freq=kwargs.get('checkpoint_freq', 10),
                  samples_per_epoch=kwargs.get('samples_per_epoch'),
                  xtra_checkpoint_items=kwargs['model'],
+                 scaler_state_dict=scaler_state_dict,
                  )
 
