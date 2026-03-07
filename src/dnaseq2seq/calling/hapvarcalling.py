@@ -16,6 +16,14 @@ from dnaseq2seq.calling import vcf
 from dnaseq2seq.calling.vcf import Variant
 
 @dataclass
+class EncodedRegion:
+    encoded_pileup: Tensor
+    region: Tuple[str, int, int]
+    start_positions: List[int]
+    index: int
+    midpoint_depths: Optional[np.ndarray] = None
+
+@dataclass
 class HaplotypeVars:
     hap0: Dict[Tuple[str, int, int], List[Variant]] = field(default_factory=dict)
     hap1: Dict[Tuple[str, int, int], List[Variant]] = field(default_factory=dict)
@@ -109,13 +117,13 @@ class VarHapCaller:
     def worker_init(self, worker_index: int):
         self.set_device(torch.device(f"cuda:{worker_index}"))
 
-    def __call__(self, data: Tensor):
+    def __call__(self, data: EncodedRegion):
         if data is None:
             return stage.SkipResult()
-        data['encoded_pileup'] = data['encoded_pileup'].to(self.device)
+        data.encoded_pileup = data.encoded_pileup.to(self.device)
         self.data_buffer.append(data)
-        self.windows_buffered += data['encoded_pileup'].shape[0]
-        logger.debug(f"New data with {data['encoded_pileup'].shape[0]} winodws, buffer length: {len(self.data_buffer)}, total windows buffered: {self.windows_buffered}")
+        self.windows_buffered += data.encoded_pileup.shape[0]
+        logger.debug(f"New data with {data.encoded_pileup.shape[0]} winodws, buffer length: {len(self.data_buffer)}, total windows buffered: {self.windows_buffered}")
         # We accumulate until we have slightly less than the real max batch size, this is because
         # later code will split the data into max-batch-size chunks, so if we have more than max-batch-size it'll
         # make 2 different batches, one big and one small, which is super inefficient. If we just trigger on slightly
@@ -128,11 +136,11 @@ class VarHapCaller:
             
         datas = self.data_buffer #sorted(self.data_buffer, key=priority_func) # Sorting data chunks here helps ensure sorted output
 
-        bp = sum(d['region'][2] - d['region'][1] for d in datas)
+        bp = sum(d.region[2] - d.region[1] for d in datas)
         self.bp_processed += bp
 
         logger.debug(
-            f"Calling variants up to {datas[len(datas) // 2]['region'][0]}:{datas[-1]['region'][1]}-{datas[-1]['region'][2]}, total bp processed: {round(self.bp_processed / 1e6, 3)}MB"
+            f"Calling variants up to {datas[len(datas) // 2].region[0]}:{datas[-1].region[1]}-{datas[-1].region[2]}, total bp processed: {round(self.bp_processed / 1e6, 3)}MB"
         )
         logger.debug(f"Calling variants with {self.windows_buffered} windows")
         hapvars, call_time, resolve_haplotypes_time = call_multi_paths(datas, self.model, self.reference, max_batch_size=self.max_batch_size, device=self.device)
@@ -165,12 +173,12 @@ def call_multi_paths(datas, model, reference, max_batch_size, device):
     
     :return : List of VCFRecords for variants found
     """
-    allencoded, batch_start_pos, batch_regions = merge_datas(datas)
-    haplotype_vars, call_time, resolve_haplotypes_time = call_and_merge(allencoded, batch_start_pos, batch_regions, model, reference, max_batch_size, device)
+    allencoded, batch_start_pos, batch_regions, all_midpoint_depths = merge_datas(datas)
+    haplotype_vars, call_time, resolve_haplotypes_time = call_and_merge(allencoded, batch_start_pos, batch_regions, model, reference, max_batch_size, device, midpoint_depths=all_midpoint_depths)
 
     return haplotype_vars, call_time, resolve_haplotypes_time
 
-def call_and_merge(batch, batch_offsets, regions, model, reference, max_batch_size, device):
+def call_and_merge(batch, batch_offsets, regions, model, reference, max_batch_size, device, midpoint_depths=None):
     """
     Generate haplotypes for the batch, identify variants in each, and then 'merge genotypes' across the overlapping
     windows with the ad-hoc algo in the resolve_haplotypes function. This also filters out any variants not found
@@ -195,7 +203,7 @@ def call_and_merge(batch, batch_offsets, regions, model, reference, max_batch_si
     byregion = defaultdict(list)
     n_output_toks = min(150 // util.TGT_KMER_SIZE - 1, max(dists) // util.TGT_KMER_SIZE + 1)
     start_time = time.perf_counter()
-    batchvars = call_batch(batch, batch_offsets, regions, model, reference, n_output_toks, max_batch_size=max_batch_size, device=device)
+    batchvars = call_batch(batch, batch_offsets, regions, model, reference, n_output_toks, max_batch_size=max_batch_size, device=device, midpoint_depths=midpoint_depths)
     for region, bvars in zip(regions, batchvars):
         byregion[region].append(bvars)
     
@@ -293,13 +301,16 @@ def resolve_haplotypes(genos):
     return allvars0, allvars1
 
 
-def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, device, enable_amp=True):
+def _call_safe(encoded_reads: torch.Tensor, model, n_output_toks: int, max_batch_size: int, device, enable_amp=True):
     """
     Predict the sequence for the encoded reads, but dont submit more than 'max_batch_size' samples
     at once
     """
     seq_preds = None
     cls_preds = None
+    hap0_ref_preds = None
+    hap1_ref_preds = None
+    hap0_hap1_preds = None
     probs = None
     start = 0
     
@@ -316,20 +327,33 @@ def _call_safe(encoded_reads, model, n_output_toks, max_batch_size, device, enab
         if seq_preds is None:
             seq_preds = preds
             cls_preds = clspred
+            hap0_ref_preds = hap0_ref_pred
+            hap1_ref_preds = hap1_ref_pred
+            hap0_hap1_preds = hap0_hap1_pred
         else:
             seq_preds = torch.concat((seq_preds, preds), dim=0)
             cls_preds = torch.concat((cls_preds, clspred), dim=0)
+            hap0_ref_preds = torch.concat((hap0_ref_preds, hap0_ref_pred), dim=0)
+            hap1_ref_preds = torch.concat((hap1_ref_preds, hap1_ref_pred), dim=0)
+            hap0_hap1_preds = torch.concat((hap0_hap1_preds, hap0_hap1_pred), dim=0)
             
         if probs is None:
-            probs = prbs.detach().cpu().numpy()
+            probs = prbs.detach().float().cpu().numpy()
         else:
-            probs = np.concatenate((probs, prbs.detach().cpu().numpy()), axis=0)
+            probs = np.concatenate((probs, prbs.detach().float().cpu().numpy()), axis=0)
         start += max_batch_size
     
-    return seq_preds, probs, cls_preds.cpu().numpy()
+    return {
+       "seq_preds": seq_preds,
+       "probs": probs,
+       "cls_preds": cls_preds.float().cpu().numpy(),
+       "hap0_ref_preds": hap0_ref_preds.float().cpu().numpy(),
+       "hap1_ref_preds": hap1_ref_preds.float().cpu().numpy(),
+       "hap0_hap1_preds": hap0_hap1_preds.float().cpu().numpy()
+    }
 
 
-def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks, max_batch_size, device):
+def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks, max_batch_size, device, midpoint_depths=None):
     """
     Call variants in a batch (list) of regions, by running a forward pass of the model and
     then aligning the predicted sequences to the reference genome and picking out any
@@ -339,14 +363,21 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
     assert encoded_reads.shape[0] == len(regions), f"Expected the same number of reads as regions, but got {encoded_reads.shape[0]} reads and {len(regions)}"
     assert len(offsets) == len(regions), f"Should be as many offsets as regions, but found {len(offsets)} and {len(regions)}"
 
-    seq_preds, probs, clspred = _call_safe(encoded_reads, model, n_output_toks, max_batch_size, device)
+    results = _call_safe(encoded_reads, model, n_output_toks, max_batch_size, device)
+    seq_preds = results["seq_preds"]
+    probs = results["probs"]
 
-    assert seq_preds.shape[0] == clspred.shape[0], f"BEFORE: Predictions and cls preds are not the same size! seq_preds shape: {seq_preds.shape} clspred.shape: {clspred.shape}, regions: {regions}"
+    # convert cls, hap0_ref, hap1_ref, and hap0_hap1 logits to probabilities via sigmoid
+    def _sigmoid(x):
+        return 1.0 / (1.0 + np.exp(-x))
 
-    # convert clspred logits to probabilities
-    clspred = np.exp(clspred)
-    
-    assert seq_preds.shape[0] == clspred.shape[0], f"AFTER: Predictions and cls preds are not the same size! seq_preds shape: {seq_preds.shape} clspred.shape: {clspred.shape}, regions: {regions}"
+    clspred = _sigmoid(results["cls_preds"])
+    hap0_ref_preds = _sigmoid(results["hap0_ref_preds"])
+    hap1_ref_preds = _sigmoid(results["hap1_ref_preds"])
+    hap0_hap1_preds = _sigmoid(results["hap0_hap1_preds"])
+
+
+    assert seq_preds.shape[0] == clspred.shape[0], f"Predictions and cls preds are not the same size! seq_preds shape: {seq_preds.shape} clspred.shape: {clspred.shape}, regions: {regions}"
 
     calledvars = []
     for offset, (chrom, start, end), b in zip(offsets, regions, range(len(seq_preds))):
@@ -356,19 +387,16 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
         probs0 = np.exp(util.expand_to_bases(probs[b, 0, :]))
         probs1 = np.exp(util.expand_to_bases(probs[b, 1, :]))
 
-        try:
-            tnpred = clspred[b].item() # This will need to change if clspred returns more than one value per region
-        except Exception as ex:
-            logger.error(f"Exception accessing clspred, index is: {b}, clspred shape: {clspred.shape}, seq_pred length: {len(seq_preds)}")
-            raise ex
-
         refseq = reference.fetch(chrom, offset, offset + len(hap0))
         vars_hap0 = list(v for v in vcf.aln_to_vars(refseq, hap0, chrom, offset, probs=probs0) if start <= v.pos <= end)
         vars_hap1 = list(v for v in vcf.aln_to_vars(refseq, hap1, chrom, offset, probs=probs1) if start <= v.pos <= end)
         for v in vars_hap0 + vars_hap1:
-            v.tnpred = tnpred
-        #print(f"Offset: {offset}\twindow {start}-{end} frame: {start % 4} hap0: {vars_hap0}\n       hap1: {vars_hap1}")
-        #calledvars.append((vars_hap0, vars_hap1))
+            v.tnpred = clspred[b].item()
+            v.hap0_ref_pred = hap0_ref_preds[b].item()
+            v.hap1_ref_pred = hap1_ref_preds[b].item()
+            v.hap0_hap1_pred = hap0_hap1_preds[b].item()
+            if midpoint_depths is not None:
+                v.midpoint_depth = int(midpoint_depths[b])
         calledvars.append((vars_hap0[0:5], vars_hap1[0:5]))
 
     return calledvars
@@ -376,25 +404,28 @@ def call_batch(encoded_reads, offsets, regions, model, reference, n_output_toks,
 
 def merge_datas(datas):
     """
-    Concat a list of datas dictionaries into a single tensor and lists of regions, start positions
+    Concat a list of EncodedRegion objects into a single tensor and lists of regions, start positions
     """
     batch_encoded = []
     batch_start_pos = []
     batch_regions = []
+    batch_midpoint_depths = []
 
     for data in datas:
-        # Load the data, parsing location + encoded data from file
-        chrom, start, end = data['region']
-        batch_encoded.append(data['encoded_pileup'])
-        batch_start_pos.extend(data['start_positions'])
-        batch_regions.extend((chrom, start, end) for _ in range(len(data['start_positions'])))
+        chrom, start, end = data.region
+        batch_encoded.append(data.encoded_pileup)
+        batch_start_pos.extend(data.start_positions)
+        batch_regions.extend((chrom, start, end) for _ in range(len(data.start_positions)))
+        if data.midpoint_depths is not None:
+            batch_midpoint_depths.append(data.midpoint_depths)
     
     if len(batch_encoded) > 1:
         allencoded = torch.concat(batch_encoded, dim=0)
     else:
         allencoded = batch_encoded[0]
 
-    return allencoded, batch_start_pos, batch_regions
+    all_midpoint_depths = np.concatenate(batch_midpoint_depths) if batch_midpoint_depths else None
+    return allencoded, batch_start_pos, batch_regions, all_midpoint_depths
 
 
 

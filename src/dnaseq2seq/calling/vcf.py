@@ -29,6 +29,10 @@ class Variant:
     var_count: int = None
     aln_score: int = None
     tnpred: float = None
+    hap0_ref_pred: float = None
+    hap1_ref_pred: float = None
+    hap0_hap1_pred: float = None
+    midpoint_depth: int = None
 
     def __eq__(self, other):
         return self.chrom == other.chrom and self.ref == other.ref and self.alt == other.alt and self.pos == other.pos
@@ -82,6 +86,10 @@ class VcfVar:
     duplicate: bool
     alts: list
     tnpred: List[float]
+    hap0_ref_pred: List[float]
+    hap1_ref_pred: List[float]
+    hap0_hap1_pred: List[float]
+    midpoint_depth: List[int] = None
 
     @property
     def alt(self):
@@ -506,6 +514,10 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             window_offset=[call.window_offset for call in vars_hap0[var]],
             var_index=[call.var_index for call in vars_hap0[var]],
             tnpred=[call.tnpred for call in vars_hap0[var]],
+            hap0_ref_pred=[call.hap0_ref_pred for call in vars_hap0[var]],
+            hap1_ref_pred=[call.hap1_ref_pred for call in vars_hap0[var]],
+            hap0_hap1_pred=[call.hap0_hap1_pred for call in vars_hap0[var]],
+            midpoint_depth=[call.midpoint_depth for call in vars_hap0[var]],
         )
 
     vcfvars_hap1 = {}
@@ -536,6 +548,10 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
             window_offset=[call.window_offset for call in vars_hap1[var]],
             var_index=[call.var_index for call in vars_hap1[var]],
             tnpred=[call.tnpred for call in vars_hap1[var]],
+            hap0_ref_pred=[call.hap0_ref_pred for call in vars_hap1[var]],
+            hap1_ref_pred=[call.hap1_ref_pred for call in vars_hap1[var]],
+            hap0_hap1_pred=[call.hap0_hap1_pred for call in vars_hap1[var]],
+            midpoint_depth=[call.midpoint_depth for call in vars_hap1[var]],
         )
 
     # check for homozygous vars
@@ -551,6 +567,10 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
         vcfvars_hap0[var].het = False
         vcfvars_hap0[var].window_offset = sorted(set(vcfvars_hap0[var].window_offset + vcfvars_hap1[var].window_offset))
         vcfvars_hap0[var].tnpred = list(x for x in vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred)
+        vcfvars_hap0[var].hap0_ref_pred = list(x for x in vcfvars_hap0[var].hap0_ref_pred + vcfvars_hap1[var].hap0_ref_pred)
+        vcfvars_hap0[var].hap1_ref_pred = list(x for x in vcfvars_hap0[var].hap1_ref_pred + vcfvars_hap1[var].hap1_ref_pred)
+        vcfvars_hap0[var].hap0_hap1_pred = list(x for x in vcfvars_hap0[var].hap0_hap1_pred + vcfvars_hap1[var].hap0_hap1_pred)
+        vcfvars_hap0[var].midpoint_depth = list(x for x in vcfvars_hap0[var].midpoint_depth + vcfvars_hap1[var].midpoint_depth)
         # then remove from hap1 vars
         vcfvars_hap1.pop(var)
 
@@ -663,6 +683,14 @@ def create_vcf_header(sample_name="sample", lowcov=30, cmdline=None):
                                  ('Description', 'Original quality if classifier used to update QUAL field')])
     vcfh.add_meta('INFO', items=[('ID', "TNPRED"), ('Number', "."), ('Type', 'Float'),
                                  ('Description', 'Predicted probability of being a true negative')])
+    vcfh.add_meta('INFO', items=[('ID', "HAP0_REF_PRED"), ('Number', "."), ('Type', 'Float'),
+                                 ('Description', 'Predicted probability of haplotype 0 equal to reference')])
+    vcfh.add_meta('INFO', items=[('ID', "HAP1_REF_PRED"), ('Number', "."), ('Type', 'Float'),
+                                 ('Description', 'Predicted probability of haplotype 1 equal to reference')])
+    vcfh.add_meta('INFO', items=[('ID', "HAP0_HAP1_PRED"), ('Number', "."), ('Type', 'Float'),
+                                 ('Description', 'Predicted probability of haplotype 0 and haplotype 1 being the same')])
+    vcfh.add_meta('INFO', items=[('ID', "MIDPOINT_DEPTH"), ('Number', "."), ('Type', 'Integer'),
+                                 ('Description', 'Read depth at midpoint of each calling window')])
     # write to new vcf file object
     return vcfh
 
@@ -681,12 +709,12 @@ def prob_to_phred(p, max_qual=1000.0):
         return min(max_qual, -10 * np.log10(1.0 - p))
 
 
-def create_vcf_rec(var, vcf_file):
+def create_vcf_rec(var: VcfVar, vcf_file: pysam.VariantFile) -> pysam.VariantRecord:
     """
-    create single variant record from pandas row
-    :param var:
-    :param vcf_file:
-    :return:
+    Create single variant record from VcfVar object
+    :param var: VcfVar object
+    :param vcf_file: pysam VariantFile object
+    :return: pysam VariantRecord object
     """
     # Create record
     vcf_filter = var.filter if var.filter else "PASS"
@@ -709,6 +737,11 @@ def create_vcf_rec(var, vcf_file):
     r.info['WIN_OFFSETS'] = [int(x) for x in var.window_offset]
     r.info['VAR_INDEX'] = [int(x) for x in var.var_index]
     r.info['TNPRED'] = [float(f"{x :.4f}") for x in var.tnpred]
+    r.info['HAP0_REF_PRED'] = [float(f"{x :.4f}") for x in var.hap0_ref_pred]
+    r.info['HAP1_REF_PRED'] = [float(f"{x :.4f}") for x in var.hap1_ref_pred]
+    r.info['HAP0_HAP1_PRED'] = [float(f"{x :.4f}") for x in var.hap0_hap1_pred]
+    if var.midpoint_depth is not None:
+        r.info['MIDPOINT_DEPTH'] = [int(x) for x in var.midpoint_depth]
     if var.duplicate:
         r.info['DUPLICATE'] = ()
     return r

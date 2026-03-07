@@ -44,12 +44,12 @@ def _worker_run(
         halt_on_exception: bool = True,
         stats_update_interval: int = 5):  # Only update shared stats every N items
     """
-    Optimized worker function with reduced lock contention.
+    Pull items from the input queue, process them, and put the results on the output queue, with some basic stats tracking.
+    This function is used by Stage to actually execute the target function on each item from the input queue, with 
+    appropriate synchronization, stats tracking, and error handling.
+
+    It pulls items from the input queue until either the StageStopSignal is received, or the WorkerEndSignal is received from all other workers.
     
-    Key differences from original:
-    - Uses local counters, only syncs to shared state periodically
-    - Uses atomic counters (multiprocessing.Value) for frequently-updated critical stats
-    - Batches updates to reduce lock acquisitions
     """
     logger.info(f"Worker {worker_index} of stage {stage_name} starting")
     abort = False

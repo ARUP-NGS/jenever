@@ -162,7 +162,7 @@ class VCFWriter:
         return stage.SkipResult()
 
 
-def merge_multialts(v0, v1):
+def merge_multialts(v0: VCFRecord, v1: VCFRecord) -> VCFRecord:
     """
     Merge two VcfVar objects into a single one with two alts
 

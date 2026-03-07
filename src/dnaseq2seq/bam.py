@@ -217,6 +217,20 @@ class ReadWindowFast:
         return torch.from_numpy(t)
 
 
+def depth_from_window(window):
+    """
+    Compute per-position read depth from a window tensor.
+
+    :param window: torch.Tensor of shape (window_size, max_reads, 10) or
+                   (batch, window_size, max_reads, 10)
+    :return: numpy array of shape (window_size,) if unbatched, or
+             (batch, window_size) if batched
+    """
+    if window.dim() == 4:
+        return window[:, :, :, 0:4].sum(dim=(2, 3)).numpy()
+    return window[:, :, 0:4].sum(dim=(1, 2)).numpy()
+
+
 def encode_read(read, prepad=0, tot_length=None):
     """
     Encode the given read into a tensor

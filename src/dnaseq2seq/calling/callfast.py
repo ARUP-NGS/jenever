@@ -18,6 +18,7 @@ from dnaseq2seq import util
 from dnaseq2seq import bam
 from dnaseq2seq.calling import stage
 from dnaseq2seq.calling import hapvarcalling
+from dnaseq2seq.calling.hapvarcalling import EncodedRegion
 from dnaseq2seq.calling import hapvarcalling_optimized
 from dnaseq2seq.calling import vcfwriter
 
@@ -87,19 +88,8 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
     else:
         assert Path(classifier_path).is_file(), f"Classifier model {classifier_path} isn't a regular file"
 
-    test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, max_batch_size, vcf_out, vcf_header_extras)
-    # call_vars_in_parallel(
-    #     bampath=bam,
-    #     bed=bed,
-    #     refpath=reference_fasta,
-    #     model_path=model_path,
-    #     classifier_path=classifier_path,
-    #     threads=threads,
-    #     max_batch_size=max_batch_size,
-    #     vcf_out=vcf_out,
-    #     vcf_header_extras=vcf_header_extras,
-    #     show_progress=not kwargs.get('no_progress', False),
-    # )
+    run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path, max_batch_size, vcf_out, vcf_header_extras)
+
 
     logger.info(f"All variants saved to {vcf_out}")
     end_time = time.perf_counter()
@@ -112,7 +102,7 @@ def call(model_path: str, bam: str, bed: str, reference_fasta: str, vcf_out: str
         logger.info(f"Total running time of call subcommand is: {elapsed_seconds :.2f} seconds")
 
 
-def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, max_batch_size, vcf_out, vcf_header_extras):
+def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path, max_batch_size, vcf_out, vcf_header_extras):
     """
     Test the parallel calling function
     """
@@ -153,7 +143,7 @@ def test_parallel_call(bam, bed, reference_fasta, model_path, classifier_path, m
     bed_chunker_stage.run()
 
     logger.info(f"Creating region encoder stage with {region_encoder_workers} workers")
-    region_encoder = RegionEncoder(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
+    region_encoder = RegionEncoderWorker(bampath, refpath, modelconf['max_read_depth'], window_size, min_reads, max_batch_size, window_step)
     region_encoder_stage = stage.Stage(
         "region-encoder", 
         region_encoder, 
@@ -242,12 +232,15 @@ def region_base_pairs(idxregion: IndexedRegion):
         return 0
     return idxregion.end - idxregion.start
     
-def encoded_region_base_pairs(encoded_region: torch.Tensor):
+def encoded_region_base_pairs(encoded_region: EncodedRegion):
     if encoded_region is None:
         return 0
-    return encoded_region['region'][2] - encoded_region['region'][1]
+    return encoded_region.region[2] - encoded_region.region[1]
 
-class RegionEncoder:
+class RegionEncoderWorker:
+    """
+    Callable that takes an IndexedRegion (likely produced by a BedChunker) and encodes the reads in the region into a tensor.
+    """
     def __init__(self, bampath, refpath, max_read_depth: int, window_size: int, min_reads: int, batch_size: int, window_step: int):
         self.bampath = bampath
         self.refpath = refpath
@@ -270,25 +263,30 @@ class RegionEncoder:
         
         all_encoded = []
         all_starts = []
-        for encoded_region, start_positions in _encode_region(self.aln, self.reference, idxregion.chrom, idxregion.start, idxregion.end, self.max_read_depth,
+        all_depths = []
+        for encoded_region, start_positions, depth_profiles in _encode_region(self.aln, self.reference, idxregion.chrom, idxregion.start, idxregion.end, self.max_read_depth,
                                                      window_size=self.window_size, min_reads=self.min_reads, batch_size=self.batch_size, window_step=self.window_step):
             all_encoded.append(encoded_region)
             all_starts.extend(start_positions)
+            all_depths.append(depth_profiles)
         if len(all_encoded) > 1:
             encoded = torch.concat(all_encoded, dim=0)
+            depths = np.concatenate(all_depths, axis=0)
         elif len(all_encoded) == 1:
             encoded = all_encoded[0]
+            depths = all_depths[0]
         else:
             logger.error(f"Uh oh, did not find any encoded paths!, region is {idxregion.chrom}:{idxregion.start}-{idxregion.end}")
             return None
         encoded.share_memory_()
-        data = {
-            'encoded_pileup': encoded,
-            'region': (idxregion.chrom, idxregion.start, idxregion.end),
-            'start_positions': all_starts,
-            'index': idxregion.index,
-        }
-        return data
+        midpoint_depths = depths[:, depths.shape[1] // 2]
+        return EncodedRegion(
+            encoded_pileup=encoded,
+            region=(idxregion.chrom, idxregion.start, idxregion.end),
+            start_positions=all_starts,
+            index=idxregion.index,
+            midpoint_depths=midpoint_depths,
+        )
 
 
 def add_ref_bases(encbases, reference, chrom, start, end, max_read_depth):
@@ -320,11 +318,12 @@ def _encode_region(aln, reference, chrom: str, start: int, end: int, max_read_de
     (or batch_size is small) this could generate multiple batches
 
     :param window_size: Size of region in bp to generate for each item
-    :returns: Generator for tuples of (batch tensor, list of start positions)
+    :returns: Generator for tuples of (batch tensor, list of start positions, depth profiles array)
     """
     window_start = int(start - 0.7 * window_size)  # We start with regions a bit upstream of the focal / target region
     batch = []
     batch_offsets = []
+    batch_depths = []
     readwindow = bam.ReadWindowFast(aln, chrom, start - 150, end + window_size)
     logger.debug(f"Encoding region {chrom}:{start}-{end}")
     returned_count = 0
@@ -332,6 +331,7 @@ def _encode_region(aln, reference, chrom: str, start: int, end: int, max_read_de
         try:
             #logger.debug(f"Getting reads from  readwindow: {window_start} - {window_start + window_size}")
             enc_reads = readwindow.get_window(window_start, window_start + window_size, max_reads=max_read_depth)
+            batch_depths.append(bam.depth_from_window(enc_reads))
             encoded_with_ref = add_ref_bases(enc_reads, reference, chrom, window_start, window_start + window_size,
                                              max_read_depth=max_read_depth)
             batch.append(encoded_with_ref)
@@ -346,15 +346,16 @@ def _encode_region(aln, reference, chrom: str, start: int, end: int, max_read_de
         if len(batch) >= batch_size:
             encodedreads = torch.stack(batch, dim=0).cpu()
             returned_count += 1
-            yield encodedreads, batch_offsets
+            yield encodedreads, batch_offsets, np.stack(batch_depths)
             batch = []
             batch_offsets = []
+            batch_depths = []
 
     # Last few
     if batch:
         encodedreads = torch.stack(batch, dim=0).cpu() # Keep encoded tensors on cpu for now
         returned_count += 1
-        yield encodedreads, batch_offsets
+        yield encodedreads, batch_offsets, np.stack(batch_depths)
 
     if not returned_count:
         logger.debug(f"Region {chrom}:{start}-{end} has only low coverage areas, not encoding data")
@@ -508,11 +509,12 @@ def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_siz
     (or batch_size is small) this could generate multiple batches
 
     :param window_size: Size of region in bp to generate for each item
-    :returns: Generator for tuples of (batch tensor, list of start positions)
+    :returns: Generator for tuples of (batch tensor, list of start positions, depth profiles array)
     """
     window_start = int(start - 0.7 * window_size)  # We start with regions a bit upstream of the focal / target region
     batch = []
     batch_offsets = []
+    batch_depths = []
     readwindow = bam.ReadWindow(aln, chrom, start - 150, end + window_size)
     logger.debug(f"Encoding region {chrom}:{start}-{end}")
     returned_count = 0
@@ -520,6 +522,7 @@ def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_siz
         try:
             #logger.debug(f"Getting reads from  readwindow: {window_start} - {window_start + window_size}")
             enc_reads = readwindow.get_window(window_start, window_start + window_size, max_reads=max_read_depth)
+            batch_depths.append(bam.depth_from_window(enc_reads))
             encoded_with_ref = add_ref_bases(enc_reads, reference, chrom, window_start, window_start + window_size,
                                              max_read_depth=max_read_depth)
             batch.append(encoded_with_ref)
@@ -534,15 +537,16 @@ def _encode_region(aln, reference, chrom, start, end, max_read_depth, window_siz
         if len(batch) >= batch_size:
             encodedreads = torch.stack(batch, dim=0).cpu()
             returned_count += 1
-            yield encodedreads, batch_offsets
+            yield encodedreads, batch_offsets, np.stack(batch_depths)
             batch = []
             batch_offsets = []
+            batch_depths = []
 
     # Last few
     if batch:
         encodedreads = torch.stack(batch, dim=0).cpu() # Keep encoded tensors on cpu for now
         returned_count += 1
-        yield encodedreads, batch_offsets
+        yield encodedreads, batch_offsets, np.stack(batch_depths)
 
     if not returned_count:
         logger.debug(f"Region {chrom}:{start}-{end} has only low coverage areas, not encoding data")
