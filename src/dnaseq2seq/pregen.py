@@ -17,7 +17,8 @@ import numpy as np
 import pysam
 import torch
 
-from dnaseq2seq.calling import call
+
+from dnaseq2seq.calling import callfast as call
 from dnaseq2seq import util
 from dnaseq2seq.bam import target_string_to_tensor, encode_and_downsample, ensure_dim
 from dnaseq2seq.training import phaser
@@ -32,6 +33,37 @@ def load_conf(confyaml):
     assert 'reference' in conf, "Expected 'reference' entry in training configuration"
     assert 'data' in conf, "Expected 'data' entry in training configuration"
     return conf
+
+class LazyLoader:
+    """
+    A loader that doesn't load anything until iter_once() is called, and doesn't save anything in memory
+    This will be pretty slow but good if we can't fit all of the data into memory
+    Useful for 'pre-gen' where we just want to iterate over everything once and save it to a file
+    """
+
+    def __init__(self, bam, bed, vcf, reference, reads_per_pileup, samples_per_pos, vals_per_class, max_jitter_bases):
+        self.bam = bam
+        self.bed = bed
+        self.vcf = vcf
+        self.reference = reference
+        self.reads_per_pileup = reads_per_pileup
+        self.samples_per_pos = samples_per_pos
+        self.vals_per_class = vals_per_class
+        self.max_jitter_bases = max_jitter_bases
+
+    def iter_once(self, batch_size):
+        logger.info(f"Encoding tensors from {self.bam} and {self.vcf}")
+        for src, tgt, vaftgt, varsinfo in encode_chunks(self.bam,
+                                                        self.reference,
+                                                        self.bed,
+                                                        self.vcf,
+                                                        batch_size,
+                                                        self.reads_per_pileup,
+                                                        self.samples_per_pos,
+                                                        self.vals_per_class,
+                                                        max_to_load=1e9,
+                                                        max_jitter_bases=self.max_jitter_bases):
+            yield src, tgt, vaftgt, varsinfo
 
 
 def default_vals_per_class():

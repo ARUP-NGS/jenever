@@ -566,11 +566,13 @@ def construct_vcfvars(vars_hap0, vars_hap1, aln, reference, mindepth=30):
         vcfvars_hap0[var].genotype = (1, 1)
         vcfvars_hap0[var].het = False
         vcfvars_hap0[var].window_offset = sorted(set(vcfvars_hap0[var].window_offset + vcfvars_hap1[var].window_offset))
-        vcfvars_hap0[var].tnpred = list(x for x in vcfvars_hap0[var].tnpred + vcfvars_hap1[var].tnpred)
-        vcfvars_hap0[var].hap0_ref_pred = list(x for x in vcfvars_hap0[var].hap0_ref_pred + vcfvars_hap1[var].hap0_ref_pred)
-        vcfvars_hap0[var].hap1_ref_pred = list(x for x in vcfvars_hap0[var].hap1_ref_pred + vcfvars_hap1[var].hap1_ref_pred)
-        vcfvars_hap0[var].hap0_hap1_pred = list(x for x in vcfvars_hap0[var].hap0_hap1_pred + vcfvars_hap1[var].hap0_hap1_pred)
-        vcfvars_hap0[var].midpoint_depth = list(x for x in vcfvars_hap0[var].midpoint_depth + vcfvars_hap1[var].midpoint_depth)
+
+        # These metrics are per-window, so we don't need separate values for each haplotype
+        vcfvars_hap0[var].tnpred = vcfvars_hap0[var].tnpred
+        vcfvars_hap0[var].hap0_ref_pred = vcfvars_hap0[var].hap0_ref_pred
+        vcfvars_hap0[var].hap1_ref_pred = vcfvars_hap0[var].hap1_ref_pred
+        vcfvars_hap0[var].hap0_hap1_pred = vcfvars_hap0[var].hap0_hap1_pred
+        vcfvars_hap0[var].midpoint_depth = vcfvars_hap0[var].midpoint_depth
         # then remove from hap1 vars
         vcfvars_hap1.pop(var)
 

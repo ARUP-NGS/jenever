@@ -6,7 +6,6 @@ logger = logging.getLogger(__name__)
 import random
 import math
 from pathlib import Path
-from collections import defaultdict
 from itertools import chain
 import lz4.frame
 from datetime import datetime, timedelta
@@ -17,12 +16,10 @@ from typing import Union, List
 from torch.utils.data import DataLoader, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
-import numpy as np
 import torch
 import torch.multiprocessing as mp
 
 from dnaseq2seq import util
-from dnaseq2seq import pregen
 from dnaseq2seq.training.lmdbdataset import LMDBDataset
 from dnaseq2seq.training.varsinfodatawrapper import VarsInfoDataWrapper
 
@@ -46,38 +43,6 @@ class ReadLoader:
         while offset < self.src.shape[0]:
             yield self.src[offset:offset + batch_size, :, :, :].to(self.device), self.tgt[offset:offset + batch_size, :, :].to(self.device), None, None
             offset += batch_size
-
-
-class LazyLoader:
-    """
-    A loader that doesn't load anything until iter_once() is called, and doesn't save anything in memory
-    This will be pretty slow but good if we can't fit all of the data into memory
-    Useful for 'pre-gen' where we just want to iterate over everything once and save it to a file
-    """
-
-    def __init__(self, bam, bed, vcf, reference, reads_per_pileup, samples_per_pos, vals_per_class, max_jitter_bases):
-        self.bam = bam
-        self.bed = bed
-        self.vcf = vcf
-        self.reference = reference
-        self.reads_per_pileup = reads_per_pileup
-        self.samples_per_pos = samples_per_pos
-        self.vals_per_class = vals_per_class
-        self.max_jitter_bases = max_jitter_bases
-
-    def iter_once(self, batch_size):
-        logger.info(f"Encoding tensors from {self.bam} and {self.vcf}")
-        for src, tgt, vaftgt, varsinfo in pregen.encode_chunks(self.bam,
-                                                        self.reference,
-                                                        self.bed,
-                                                        self.vcf,
-                                                        batch_size,
-                                                        self.reads_per_pileup,
-                                                        self.samples_per_pos,
-                                                        self.vals_per_class,
-                                                        max_to_load=1e9,
-                                                        max_jitter_bases=self.max_jitter_bases):
-            yield src, tgt, vaftgt, varsinfo
 
 
 
