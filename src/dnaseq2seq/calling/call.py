@@ -113,8 +113,9 @@ def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path,
     min_reads = 5
     max_batch_size = 256
     window_step = 25
-    region_finder_workers = 2
+    region_finder_workers = 3
     region_encoder_workers = 12 * gpu_count
+    emit_stats_output = False
     
     gpu_profiler = util.GPUProfiler(gpu_index=0, interval=0.2)
     total_regions, total_bases = util.count_bed(inputbed)
@@ -164,36 +165,57 @@ def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path,
     region_encoder_stage.connect(variant_caller_stage)
     region_encoder_stage.run()
 
-    logger.info(f"Creating vcf writer stage")
-    vcf_writer = vcfwriter.VCFWriter(vcf_out, refpath=refpath, bampath=bampath, classifier_model=classifier_path)
+    vcf_writer_workers = 4
+    logger.info(f"Creating vcf writer stage with {vcf_writer_workers} workers")
+    vcf_writer = vcfwriter.VCFWriter(refpath=refpath, bampath=bampath, classifier_model=classifier_path)
     vcf_writer_stage = stage.Stage(
         "vcf-writer", 
         vcf_writer, 
-        n_workers=1,
+        n_workers=vcf_writer_workers,
         stats_update_interval=1,
     )
     variant_caller_stage.connect(vcf_writer_stage)
     variant_caller_stage.run()
+
+    logger.info(f"Creating vcf collector stage")
+    vcf_collector = vcfwriter.VCFCollector(vcf_out, vcf_header_extras=vcf_header_extras)
+    vcf_collector_stage = stage.Stage(
+        "vcf-collector",
+        vcf_collector,
+        n_workers=1,
+        stats_update_interval=1,
+    )
+    vcf_writer_stage.connect(vcf_collector_stage)
     vcf_writer_stage.run()
+    vcf_collector_stage.run()
     
     gpu_profiler.start()
     
-    progress = 0.0
+    last_log_time = time.perf_counter()
+    log_interval = 5.0
     try:
-        for i, result in enumerate(vcf_writer_stage.drain()):
-            if i % 50 == 0:
+        for i, result in enumerate(vcf_collector_stage.drain()):
+            now = time.perf_counter()
+            if now - last_log_time >= log_interval:
+                last_log_time = now
                 bp_chunked = bed_chunker_stage.stats['custom_counter']
-                regions_identified = region_finder_stage.stats['items_processed']
                 bp_identified = region_finder_stage.stats['custom_counter']
                 regions_encoded = region_encoder_stage.stats['items_processed']
                 bp_called = variant_caller_stage.stats['custom_counter']
-                items_called = variant_caller_stage.stats['items_received']
-                progress = bp_called / bp_chunked if bp_chunked > 0 else 0.0
-                finder_queue_length = bed_chunker_stage.stats['items_processed'] - region_finder_stage.stats['items_received']
-                encoded_queue_length = regions_identified - regions_encoded
-                calling_queue_length = regions_encoded - items_called
-                logger.info(f"Iter {i} BP chunked: {util.format_bp(bp_chunked)}, BP identified: {util.format_bp(bp_identified)}, BP called: {util.format_bp(bp_called)}, Regions identified: {regions_identified}, Regions encoded: {regions_encoded}, Items called: {items_called}, Progress: {progress * 100:.2f}%")
-                logger.info(f"Finder queue: {finder_queue_length}, Encoder queue: {encoded_queue_length}, Caller queue: {calling_queue_length}")
+                vcf_records_produced = vcf_writer_stage.stats['items_processed']
+                # finder_queue_length = bed_chunker_stage.stats['items_processed'] - region_finder_stage.stats['items_received']
+                # encoded_queue_length = region_finder_stage.stats['items_processed'] - region_encoder_stage.stats['items_received']
+                # calling_queue_length = region_encoder_stage.stats['items_processed'] - variant_caller_stage.stats['items_received']
+                # vcf_queue_length = variant_caller_stage.stats['items_processed'] - vcf_writer_stage.stats['items_received']
+                # collector_queue_length = vcf_records_produced - vcf_collector_stage.stats['items_received']
+                pct_complete = bp_identified / total_bases * 100.0
+                # logger.info(f"Region finder received: {region_finder_stage.stats['items_received']}, processed: {region_finder_stage.stats['items_processed']}")
+                # logger.info(f"Region encoder received: {region_encoder_stage.stats['items_received']}, processed: {region_encoder_stage.stats['items_processed']}")
+                # logger.info(f"Variant caller received: {variant_caller_stage.stats['items_received']}, processed: {variant_caller_stage.stats['items_processed']}")
+                # logger.info(f"VCF writer received: {vcf_writer_stage.stats['items_received']}, processed: {vcf_writer_stage.stats['items_processed']}")
+                # logger.info(f"VCF collector received: {vcf_collector_stage.stats['items_received']}, processed: {vcf_collector_stage.stats['items_processed']}")
+                logger.info(f"Iter {i} BP chunked: {util.format_bp(bp_chunked)}, BP identified: {util.format_bp(bp_identified)}, BP called: {util.format_bp(bp_called)} Regions encoded: {regions_encoded} VCF records: {vcf_records_produced}, Progress: {pct_complete:.2f}%")
+                # logger.info(f"Finder queue: {finder_queue_length}, Encoder queue: {encoded_queue_length}, Caller queue: {calling_queue_length}, VCF queue: {vcf_queue_length}, Collector queue: {collector_queue_length}")
         
         bed_chunker_stage.join(propogate_downstream=True)
     except KeyboardInterrupt:
@@ -203,27 +225,17 @@ def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path,
         region_encoder_stage.abort()
         variant_caller_stage.abort()
         vcf_writer_stage.abort()
+        vcf_collector_stage.abort()
         raise KeyboardInterrupt
     gpu_profiler.stop()
     
-    print(f"Done encoding regions, found {i+1} regions")
-    print(f"Bed chunker stats:")
-    pprint(bed_chunker_stage.get_stats())
-    print(f"Region finder stats:")
-    pprint(region_finder_stage.get_stats())
-    print(f"Region encoder stats:")
-    pprint(region_encoder_stage.get_stats())
-    print(f"Variant caller stats:")
-    pprint(variant_caller_stage.get_stats())
-    print(f"VCF writer stats:")
-    pprint(vcf_writer_stage.get_stats())
-
-    from dnaseq2seq.calling import stats_display
-    all_stats = [bed_chunker_stage.get_stats(), region_finder_stage.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats()]
-    all_names = ["bed-chunker", "region-finder", "region-encoder", "variant-caller", "vcf-writer"]
-    stats_display.print_stats(all_stats, stage_names=all_names)
-    print(f"GPU profiler report:")
-    pprint(gpu_profiler.get_report())
+    if emit_stats_output:
+        from dnaseq2seq.calling import stats_display
+        all_stats = [bed_chunker_stage.get_stats(), region_finder_stage.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats(), vcf_collector_stage.get_stats()]
+        all_names = ["bed-chunker", "region-finder", "region-encoder", "variant-caller", "vcf-writer", "vcf-collector"]
+        stats_display.print_stats(all_stats, stage_names=all_names)
+        print(f"GPU profiler report:")
+        pprint(gpu_profiler.get_report())
 
 
 def region_base_pairs(idxregion: IndexedRegion):

@@ -6,6 +6,7 @@
 # docker image:  docker pull pkrusche/hap.py
 # all file paths absolute! (simplified docker volume mounting)
 
+set -xuo
 
 # output files
 #OUT_PREFIX="Nextera_GM24385_500ng"
@@ -28,10 +29,10 @@ STRAT_TSV="/mnt/ri_share/Data/variant-transformer/v3.0-stratifications-GRCh37/v3
 # reference files
 REF_DIR="/mnt/ri_share/Data/variant-transformer/ref/" 
 REF="human_g1k_v37_decoy_phiXAdaptr.fasta" 
-VCFEVAL_REF="/mnt/ri_share/Data/variant-transformer/ref/human_g1k_v37_decoy_phiXAdaptr.sdf"
+VCFEVAL_REF="human_g1k_v37_decoy_phiXAdaptr.sdf"
 
 
-sudo docker run -it \
+sudo docker run --tty=false \
         -v ${TRUTH_VCF%/*}:${TRUTH_VCF%/*} \
         -v ${QUERY_VCF%/*}:${QUERY_VCF%/*} \
         -v ${TARGET_BED%/*}:${TARGET_BED%/*} \
@@ -47,6 +48,7 @@ sudo docker run -it \
         --stratification $STRAT_TSV \
         --target-regions $TARGET_BED \
         --engine vcfeval \
+        --threads 16 \
         --engine-vcfeval-template $REF_DIR/$VCFEVAL_REF
 
 

@@ -38,11 +38,11 @@ def _worker_run(
         input_queue: Queue,
         output_queue: Queue, 
         should_stop: Event, 
-        shared_counters: Dict[str, Any],  # Atomic counters for critical stats
-        worker_stats_list: List,  # Per-worker stats (updated locally, read periodically)
+        coordination: Dict[str, Any],
+        worker_stats_list: List,
         custom_item_counter: Callable = None,
         halt_on_exception: bool = True,
-        stats_update_interval: int = 5):  # Only update shared stats every N items
+        stats_update_interval: int = 1):
     """
     Pull items from the input queue, process them, and put the results on the output queue, with some basic stats tracking.
     This function is used by Stage to actually execute the target function on each item from the input queue, with 
@@ -57,17 +57,14 @@ def _worker_run(
     if hasattr(target_func, 'worker_init'):
         target_func.worker_init(worker_index)
 
-    # Local counters - much faster than shared state
     local_items_received = 0
-    # Track total processed for display, and a batch counter for periodic shared syncs.
-    local_items_processed_total = 0
-    local_items_processed_batch = 0
+    local_items_processed = 0
     local_total_wait_time = 0.0
     local_total_process_time = 0.0
     local_custom_counter = 0
     local_items_skipped = 0
+    local_first_item_time = -1.0
     items_since_last_sync = 0
-    first_item_recorded = False
 
     while True:
         wait_start = time.time()
@@ -93,18 +90,15 @@ def _worker_run(
             break
 
         if isinstance(item, WorkerEndSignal):
-            # Atomic increment for worker end signals
-            with shared_counters['worker_end_lock']:
-                shared_counters['worker_end_signals_received'].value += 1
-                if shared_counters['worker_end_signals_received'].value == shared_counters['worker_end_signals_expected'].value:
+            with coordination['worker_end_lock']:
+                coordination['worker_end_signals_received'].value += 1
+                if coordination['worker_end_signals_received'].value == coordination['worker_end_signals_expected'].value:
                     logger.info(f"Worker {worker_index} of stage {stage_name} received all worker end signals")
                     should_stop.set()
             continue
 
-        # Record first item time (only once)
-        if not first_item_recorded:
-            shared_counters['first_item_time'].value = time.time() - shared_counters['start_time'].value
-            first_item_recorded = True
+        if local_first_item_time < 0:
+            local_first_item_time = time.time() - coordination['start_time'].value
 
         local_items_received += 1
         if custom_item_counter is not None:
@@ -127,30 +121,20 @@ def _worker_run(
                 output_queue.put(result)
                 output_items_put += 1
 
-            local_items_processed_total += output_items_put
-            local_items_processed_batch += output_items_put
+            local_items_processed += output_items_put
             items_since_last_sync += 1
 
-            # Periodically sync local stats to shared state (reduces lock contention dramatically)
             if items_since_last_sync >= stats_update_interval:
-                # Update atomic counters (lock-free for simple operations)
-                shared_counters['items_received'].value += items_since_last_sync
-                shared_counters['items_processed'].value += local_items_processed_batch
-                shared_counters['custom_counter'].value += local_custom_counter
-                
-                # Update per-worker stats (each worker writes only to its own slot)
                 worker_stats_list[worker_index] = {
                     'items_received': local_items_received,
-                    'items_processed': local_items_processed_total,
+                    'items_processed': local_items_processed,
                     'total_wait_time': local_total_wait_time,
                     'total_process_time': local_total_process_time,
                     'items_skipped': local_items_skipped,
+                    'custom_counter': local_custom_counter,
+                    'first_item_time': local_first_item_time,
                 }
-                
-                # Reset batch counters
                 items_since_last_sync = 0
-                local_custom_counter = 0
-                local_items_processed_batch = 0
 
         except Exception as e:
             process_time = time.time() - process_start
@@ -161,7 +145,6 @@ def _worker_run(
                 should_stop.set()
             raise e
     
-    # Handle flush if needed - do this BEFORE final sync so flushed items are counted
     flush_items_produced = 0
     if not abort and hasattr(target_func, 'flush'):
         flush_start = time.time()
@@ -179,39 +162,35 @@ def _worker_run(
             output_queue.put(result)
             flush_items_produced += 1
         
-        local_items_processed_total += flush_items_produced
-        local_items_processed_batch += flush_items_produced
+        local_items_processed += flush_items_produced
 
-    # Final sync of remaining local stats (including any items from flush)
-    if items_since_last_sync > 0 or local_items_processed_batch > 0 or flush_items_produced > 0:
-        shared_counters['items_received'].value += items_since_last_sync
-        shared_counters['items_processed'].value += local_items_processed_batch
-        shared_counters['custom_counter'].value += local_custom_counter
-    
     worker_stats_list[worker_index] = {
         'items_received': local_items_received,
-        'items_processed': local_items_processed_total,
+        'items_processed': local_items_processed,
         'total_wait_time': local_total_wait_time,
         'total_process_time': local_total_process_time,
         'items_skipped': local_items_skipped,
+        'custom_counter': local_custom_counter,
+        'first_item_time': local_first_item_time,
     }
 
     logger.debug(f"Worker {worker_index} of stage {stage_name} putting worker end signal")
     output_queue.put(WorkerEndSignal())
     logger.info(f"Worker {worker_index} of stage {stage_name} finished")
 
-    shared_counters['release_workers'].wait()
+    coordination['release_workers'].wait()
     logger.info(f"Worker {worker_index} of stage {stage_name} terminating")
 
 
 class Stage:
     """
-    Stage implementation optimized for reduced lock contention.
-    
-    Key differences:
-    - Uses atomic counters (multiprocessing.Value) instead of Manager dict for hot stats
-    - Per-worker stats arrays instead of shared dict with lock
-    - Stats are aggregated on-demand rather than on every item
+    A processing stage that runs a target function across one or more worker
+    processes. Each worker maintains its own local counters; aggregate stats
+    are computed on-demand by iterating worker slots when callers read ``stats``
+    or ``get_stats()``.
+
+    Only coordination primitives (end-signal tracking and worker release) are
+    shared across workers.
     """
 
     def __init__(self, name: str, 
@@ -232,27 +211,56 @@ class Stage:
         self.custom_item_counter = custom_item_counter
         self.stats_update_interval = stats_update_interval
         
-        # Create Manager for complex shared state
         self.manager = Manager()
         
-        # Atomic counters for frequently-updated stats (much lower overhead than Manager dict)
-        self.shared_counters = {
+        self._coordination = {
             'start_time': Value(ctypes.c_double, 0.0),
-            'first_item_time': Value(ctypes.c_double, -1.0),
-            'items_received': Value(ctypes.c_longlong, 0),
-            'items_processed': Value(ctypes.c_longlong, 0),
-            'custom_counter': Value(ctypes.c_longlong, 0),
             'worker_end_signals_received': Value(ctypes.c_int, 0),
             'worker_end_signals_expected': Value(ctypes.c_int, -1),
             'worker_end_lock': self.manager.Lock(),
             'release_workers': self.manager.Event(),
         }
         
-        # Per-worker stats - each worker only writes to its own slot
         self.worker_stats_list = self.manager.list([{} for _ in range(n_workers)])
         
         self._status = StageStatus.NOT_STARTED
         self.workers = None
+
+    def _aggregate_worker_stats(self) -> Dict[str, Any]:
+        """Iterate all worker slots and sum counters into an aggregate dict."""
+        totals = {
+            'items_received': 0,
+            'items_processed': 0,
+            'custom_counter': 0,
+            'items_skipped': 0,
+            'total_wait_time': 0.0,
+            'total_process_time': 0.0,
+            'first_item_time': -1.0,
+        }
+        per_worker: Dict[str, Any] = {}
+
+        for i, ws in enumerate(self.worker_stats_list):
+            if not ws:
+                continue
+            totals['items_received'] += ws.get('items_received', 0)
+            totals['items_processed'] += ws.get('items_processed', 0)
+            totals['custom_counter'] += ws.get('custom_counter', 0)
+            totals['items_skipped'] += ws.get('items_skipped', 0)
+            totals['total_wait_time'] += ws.get('total_wait_time', 0.0)
+            totals['total_process_time'] += ws.get('total_process_time', 0.0)
+
+            wfit = ws.get('first_item_time', -1.0)
+            if wfit >= 0:
+                if totals['first_item_time'] < 0 or wfit < totals['first_item_time']:
+                    totals['first_item_time'] = wfit
+
+            per_worker[f'worker_{i}_items_received'] = ws.get('items_received', 0)
+            per_worker[f'worker_{i}_items_processed'] = ws.get('items_processed', 0)
+            per_worker[f'worker_{i}_wait_time'] = ws.get('total_wait_time', 0.0)
+            per_worker[f'worker_{i}_process_time'] = ws.get('total_process_time', 0.0)
+            per_worker[f'worker_{i}_items_skipped'] = ws.get('items_skipped', 0)
+
+        return {**totals, **per_worker}
 
     def connect(self, downstream_stage: 'Stage'):
         if self._status != StageStatus.NOT_STARTED:
@@ -263,7 +271,7 @@ class Stage:
         self.downstream_stage.set_upstream_worker_count(self.n_workers)
 
     def set_upstream_worker_count(self, total_workers: int):
-        self.shared_counters['worker_end_signals_expected'].value = total_workers
+        self._coordination['worker_end_signals_expected'].value = total_workers
 
     def _init_workers(self):
         self.workers = [
@@ -272,7 +280,7 @@ class Stage:
                 args=(
                     self.name, i, self.target_func, 
                     self.input_queue, self.output_queue, 
-                    self.should_stop, self.shared_counters,
+                    self.should_stop, self._coordination,
                     self.worker_stats_list,
                     self.custom_item_counter,
                     True,  # halt_on_exception
@@ -285,7 +293,7 @@ class Stage:
     def run(self):
         self._init_workers()
         self._status = StageStatus.RUNNING
-        self.shared_counters['start_time'].value = time.time()
+        self._coordination['start_time'].value = time.time()
         for i, worker in enumerate(self.workers):
             logger.info(f"Stage {self.name} starting worker {i}")
             worker.start()
@@ -296,7 +304,7 @@ class Stage:
 
     @property
     def items_processed(self) -> int:
-        return self.shared_counters['items_processed'].value
+        return self._aggregate_worker_stats()['items_processed']
 
     def put(self, item: Any):
         if self._status == StageStatus.STOPPED:
@@ -309,41 +317,17 @@ class Stage:
     @property
     def stats(self) -> Dict[str, Any]:
         """
-        Property for compatibility with existing code that accesses stage.stats.
-
-        Historically, callers expected this to include per-worker keys (e.g.
-        `worker_4_items_processed`) for rich worker displays. We keep this cheap
-        enough for polling loops, but include the latest per-worker snapshots.
+        Aggregate stats across all workers. Per-worker breakdowns are included
+        as ``worker_<i>_*`` keys for rich display.
         """
-        stats: Dict[str, Any] = {
-            'total_workers': self.n_workers,
-            'items_processed': self.shared_counters['items_processed'].value,
-            'items_received': self.shared_counters['items_received'].value,
-            'custom_counter': self.shared_counters['custom_counter'].value,
-        }
-
-        # Per-worker snapshots (best-effort: workers update their own slot periodically).
-        for i, ws in enumerate(self.worker_stats_list):
-            if not ws:
-                continue
-            stats[f'worker_{i}_items_received'] = ws.get('items_received', 0)
-            stats[f'worker_{i}_items_processed'] = ws.get('items_processed', 0)
-            stats[f'worker_{i}_wait_time'] = ws.get('total_wait_time', 0.0)
-            stats[f'worker_{i}_process_time'] = ws.get('total_process_time', 0.0)
-            stats[f'worker_{i}_items_skipped'] = ws.get('items_skipped', 0)
-
-        return stats
+        agg = self._aggregate_worker_stats()
+        agg['total_workers'] = self.n_workers
+        return agg
 
     def drain(self):
         """
         Drain results from this stage's *output* queue until all of this stage's workers have
         emitted their terminal `WorkerEndSignal()`.
-        
-        Note: `shared_counters['worker_end_signals_*']` tracks *upstream* end signals received
-        on this stage's input queue (used to stop workers). It must not be used to decide when
-        downstream consumers are done draining this stage's outputs, otherwise we can stop
-        consuming too early and leave the worker blocked during interpreter shutdown while its
-        queue feeder thread tries to flush pending output.
         """
         items_drained = 0
         end_signals_seen = 0
@@ -374,7 +358,7 @@ class Stage:
         self._status = StageStatus.STOPPED
 
     def join(self, propogate_downstream: bool = False):
-        self.shared_counters['release_workers'].set()
+        self._coordination['release_workers'].set()
         for i, worker in enumerate(self.workers):
             logger.info(f"Stage {self.name} joining worker {i}")
             if worker.is_alive():
@@ -388,43 +372,16 @@ class Stage:
             self.downstream_stage.join(propogate_downstream=propogate_downstream)
 
     def get_stats(self) -> Dict[str, Any]:
-        """Return aggregated statistics."""
-        # Aggregate per-worker stats
-        total_wait_time = 0.0
-        total_process_time = 0.0
-        total_items_skipped = 0
-        worker_details = {}
-        
-        for i, ws in enumerate(self.worker_stats_list):
-            if ws:
-                total_wait_time += ws.get('total_wait_time', 0.0)
-                total_process_time += ws.get('total_process_time', 0.0)
-                total_items_skipped += ws.get('items_skipped', 0)
-                worker_details[f'worker_{i}_items_received'] = ws.get('items_received', 0)
-                worker_details[f'worker_{i}_items_processed'] = ws.get('items_processed', 0)
-                worker_details[f'worker_{i}_wait_time'] = ws.get('total_wait_time', 0.0)
-                worker_details[f'worker_{i}_process_time'] = ws.get('total_process_time', 0.0)
-                worker_details[f'worker_{i}_items_skipped'] = ws.get('items_skipped', 0)
-        
-        items_received = self.shared_counters['items_received'].value
-        items_processed = self.shared_counters['items_processed'].value
-        
-        stats = {
-            'status': self._status.value,
-            'total_workers': self.n_workers,
-            'items_received': items_received,
-            'items_processed': items_processed,
-            'items_skipped': total_items_skipped,
-            'custom_counter': self.shared_counters['custom_counter'].value,
-            'total_wait_time': total_wait_time,
-            'total_process_time': total_process_time,
-            'avg_wait_time': total_wait_time / items_received if items_received > 0 else 0,
-            'avg_process_time': total_process_time / items_processed if items_processed > 0 else 0,
-            'first_item_time': self.shared_counters['first_item_time'].value,
-            **worker_details,
-        }
-        
-        return stats
+        """Return aggregated statistics with derived averages."""
+        agg = self._aggregate_worker_stats()
+        items_received = agg['items_received']
+        items_processed = agg['items_processed']
+
+        agg['status'] = self._status.value
+        agg['total_workers'] = self.n_workers
+        agg['avg_wait_time'] = agg['total_wait_time'] / items_received if items_received > 0 else 0
+        agg['avg_process_time'] = agg['total_process_time'] / items_processed if items_processed > 0 else 0
+        return agg
 
 
 

@@ -9,7 +9,6 @@ import pysam
 from dnaseq2seq.util import SortedVariantWriter
 from dnaseq2seq.calling import vcf
 from dnaseq2seq import util
-from dnaseq2seq.calling import buildclf
 from dnaseq2seq.calling.vcf import Variant
 from dnaseq2seq.calling import stage
 
@@ -20,8 +19,9 @@ logger = logging.getLogger(__name__)
 @dataclass
 class VCFRecord:
     """
-    A serializable VCF record that holds all standard VCF fields.
-    Can be instantiated from  dict, or JSON string.
+    A serializable VCF record that holds all standard VCF fields, because pysam records are not pickle-able.
+    When created from a pysam record, the pre-formatted VCF line is stored so that
+    SortedVariantWriter can write it directly via str().
     """
     chrom: str
     pos: int
@@ -33,6 +33,12 @@ class VCFRecord:
     info: Dict[str, Any] = field(default_factory=dict)
     format: List[str] = field(default_factory=list)
     samples: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    vcf_line: Optional[str] = None
+
+    def __str__(self) -> str:
+        if self.vcf_line is not None:
+            return self.vcf_line
+        raise ValueError("VCFRecord has no vcf_line set; cannot convert to string")
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -80,20 +86,15 @@ class VCFRecord:
     def from_pysam(cls, rec: pysam.VariantRecord) -> 'VCFRecord':
         """
         Create a VCFRecord from a pysam.VariantRecord.
+        Captures the pre-formatted VCF line so str() works with SortedVariantWriter.
         
         :param rec: pysam.VariantRecord instance
         :returns: VCFRecord instance
         """
-        # Extract filter values
         filter_list = list(rec.filter.keys()) if rec.filter else []
-        
-        # Extract info fields
         info_dict = {key: rec.info[key] for key in rec.info.keys()}
-        
-        # Extract format fields
         format_list = list(rec.format.keys()) if rec.format else []
-        
-        # Extract sample data
+
         samples_dict = {}
         for sample_name in rec.samples:
             sample = rec.samples[sample_name]
@@ -109,7 +110,8 @@ class VCFRecord:
             filter=filter_list,
             info=info_dict,
             format=format_list,
-            samples=samples_dict
+            samples=samples_dict,
+            vcf_line=str(rec),
         )
 
 
@@ -126,44 +128,75 @@ def init_vcf_output(vcf_out_path, vcf_header_extras):
 
 
 class VCFWriter:
-    def __init__(self, vcf_path, refpath=None, bampath=None,  classifier_model=None, chrom_order=None):
+    """
+    Stage worker that converts haplotype variant calls into serializable VCFRecord objects.
+    Returns a MultiResult of VCFRecords so that multiple workers can run in parallel.
+    The actual file writing is handled by the downstream VCFCollector stage.
+    """
+    def __init__(self, refpath=None, bampath=None, classifier_model=None):
         self.bampath = bampath
         self.refpath = refpath
         self.classifier_model = classifier_model
-        self.vcf_path = vcf_path
-        self.chrom_order = chrom_order
-        self.vcf_out_fh = None
+        self.bam = None
+        self.reference = None
         self.vcf_template = None
-        self.writer = None
 
-    def _init_vcf_output(self):
+    def _init_resources(self):
         self.bam = pysam.AlignmentFile(self.bampath, reference_filename=self.refpath)
         self.reference = pysam.FastaFile(self.refpath)
-        self.vcf_out_fh, self.vcf_template = init_vcf_output(self.vcf_path, self.chrom_order)
-        self.writer = SortedVariantWriter(self.vcf_out_fh, self.chrom_order)
-    
+        vcf_header = vcf.create_vcf_header(sample_name="sample", lowcov=20, cmdline=None)
+        self.vcf_template = pysam.VariantFile("/dev/null", mode='w', header=vcf_header)
+
     def __call__(self, hapvars):
-        if self.vcf_out_fh is None:
-            self._init_vcf_output()
-        
-        # The upstream stage may put in None items, we just ignore them
+        if self.bam is None:
+            self._init_resources()
+
         if hapvars is None:
             return stage.SkipResult()
 
         records = vars_hap_to_records(hapvars.hap0, hapvars.hap1, self.bam, self.reference, self.classifier_model, self.vcf_template)
-        self.writer.put_all(records)
-        serialized_records = [VCFRecord.from_pysam(rec) for rec in records]
-        return stage.MultiResult(serialized_records)
-    
+        if not records:
+            return stage.SkipResult()
+        vcf_records = [VCFRecord.from_pysam(rec) for rec in records]
+        return stage.MultiResult(vcf_records)
+
+
+class VCFCollector:
+    """
+    Final stage worker that collects serializable VCFRecord objects from
+    (potentially parallel) VCFWriter workers and writes them through a single
+    SortedVariantWriter. Must run with exactly one worker since
+    SortedVariantWriter is not thread-safe.
+    """
+    def __init__(self, vcf_path, chrom_order=None, vcf_header_extras=None):
+        self.vcf_path = vcf_path
+        self.chrom_order = chrom_order
+        self.vcf_header_extras = vcf_header_extras
+        self.vcf_out_fh = None
+        self.writer = None
+
+    def _init_output(self):
+        self.vcf_out_fh, _ = init_vcf_output(self.vcf_path, self.vcf_header_extras)
+        self.writer = SortedVariantWriter(self.vcf_out_fh, self.chrom_order)
+
+    def __call__(self, record: VCFRecord):
+        if self.vcf_out_fh is None:
+            self._init_output()
+        self.writer.put(record)
+        return 1
+
     def flush(self):
-        logger.info(f"VCFWriter flushing and closing file handle")
-        self.writer.flush()
-        self.vcf_out_fh.close()
+        logger.info("VCFCollector flushing and closing file handle")
+        if self.writer:
+            self.writer.flush()
+        if self.vcf_out_fh:
+            self.vcf_out_fh.close()
         return stage.SkipResult()
 
 
 def merge_multialts(v0: VCFRecord, v1: VCFRecord) -> VCFRecord:
     """
+    
     Merge two VcfVar objects into a single one with two alts
 
     ATCT   G
@@ -291,16 +324,16 @@ def vars_hap_to_records(vars_hap0, vars_hap1, aln, reference, classifier_model, 
     for rec in vcf_records:
         rec.info["RAW_QUAL"] = rec.qual
 
-    if classifier_model:
-        clfstart = time.time()
+    # if classifier_model:
+    #     clfstart = time.time()
         
-        clf_preds = buildclf.predict_records(vcf_records, classifier_model, bampath, refpath, threads=16)
-        for rec, pred in zip(vcf_records, clf_preds):
-            rec.qual = pred
+    #     clf_preds = buildclf.predict_records(vcf_records, classifier_model, bampath, refpath, threads=16)
+    #     for rec, pred in zip(vcf_records, clf_preds):
+    #         rec.qual = pred
 
-        clfend = time.time()
-        TOTAL_TIME_CLF += clfend - clfstart
-        logger.debug(f"Predicted variant quality for {len(vcf_records)} records in {(clfend - clfstart):6f} seconds ({(clfend - clfstart)/len(vcf_records) :6f} per record)")
+    #     clfend = time.time()
+    #     TOTAL_TIME_CLF += clfend - clfstart
+    #     logger.debug(f"Predicted variant quality for {len(vcf_records)} records in {(clfend - clfstart):6f} seconds ({(clfend - clfstart)/len(vcf_records) :6f} per record)")
 
     merged = []
     overlaps = [vcf_records[0]]

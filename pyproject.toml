@@ -33,6 +33,7 @@ dependencies = [
     "humanfriendly>=10.0",
     "ipykernel>=7.1.0",
     "torchao>=0.16.0",
+    "lightgbm>=4.6.0",
 ]
 urls = { "Homepage" = "https://github.com/ARUP-NGS/jenever" }
 
