@@ -9,6 +9,7 @@ from pprint import pp, pprint
 from pathlib import Path
 
 import torch
+from torch.cuda.memory import _record_memory_history_legacy
 import torch.multiprocessing as mp
 import pysam
 import numpy as np
@@ -167,7 +168,7 @@ def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path,
 
     vcf_writer_workers = 4
     logger.info(f"Creating vcf writer stage with {vcf_writer_workers} workers")
-    vcf_writer = vcfwriter.VCFWriter(refpath=refpath, bampath=bampath, classifier_model=classifier_path)
+    vcf_writer = vcfwriter.VCFWriter(refpath=refpath, bampath=bampath)
     vcf_writer_stage = stage.Stage(
         "vcf-writer", 
         vcf_writer, 
@@ -177,6 +178,23 @@ def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path,
     variant_caller_stage.connect(vcf_writer_stage)
     variant_caller_stage.run()
 
+    classifier_stage = None
+    if classifier_path is not None:
+        classifier_workers = 2
+        logger.info(f"Creating classifier stage with {classifier_workers} workers")
+        classifier = ClassifierWorker(classifier_path)
+        classifier_stage = stage.Stage(
+            "classifier",
+            classifier,
+            n_workers=classifier_workers,
+            stats_update_interval=1,
+        )
+        vcf_writer_stage.connect(classifier_stage)
+        vcf_writer_stage.run()
+        last_pre_collector_stage = classifier_stage
+    else:
+        last_pre_collector_stage = vcf_writer_stage
+
     logger.info(f"Creating vcf collector stage")
     vcf_collector = vcfwriter.VCFCollector(vcf_out, vcf_header_extras=vcf_header_extras)
     vcf_collector_stage = stage.Stage(
@@ -185,8 +203,8 @@ def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path,
         n_workers=1,
         stats_update_interval=1,
     )
-    vcf_writer_stage.connect(vcf_collector_stage)
-    vcf_writer_stage.run()
+    last_pre_collector_stage.connect(vcf_collector_stage)
+    last_pre_collector_stage.run()
     vcf_collector_stage.run()
     
     gpu_profiler.start()
@@ -225,14 +243,21 @@ def run_calling_workflow(bam, bed, reference_fasta, model_path, classifier_path,
         region_encoder_stage.abort()
         variant_caller_stage.abort()
         vcf_writer_stage.abort()
+        if classifier_stage is not None:
+            classifier_stage.abort()
         vcf_collector_stage.abort()
         raise KeyboardInterrupt
     gpu_profiler.stop()
     
     if emit_stats_output:
         from dnaseq2seq.calling import stats_display
-        all_stats = [bed_chunker_stage.get_stats(), region_finder_stage.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats(), vcf_collector_stage.get_stats()]
-        all_names = ["bed-chunker", "region-finder", "region-encoder", "variant-caller", "vcf-writer", "vcf-collector"]
+        all_stats = [bed_chunker_stage.get_stats(), region_finder_stage.get_stats(), region_encoder_stage.get_stats(), variant_caller_stage.get_stats(), vcf_writer_stage.get_stats()]
+        all_names = ["bed-chunker", "region-finder", "region-encoder", "variant-caller", "vcf-writer"]
+        if classifier_stage is not None:
+            all_stats.append(classifier_stage.get_stats())
+            all_names.append("classifier")
+        all_stats.append(vcf_collector_stage.get_stats())
+        all_names.append("vcf-collector")
         stats_display.print_stats(all_stats, stage_names=all_names)
         print(f"GPU profiler report:")
         pprint(gpu_profiler.get_report())
@@ -489,6 +514,129 @@ class RegionFinderWorker:
             for r in merged
         ]
         return stage.MultiResult(results)
+
+
+class ClassifierWorker:
+    """
+    Stage worker that batches VCFRecords and applies a trained LightGBM
+    classifier to each batch, replacing the QUAL field with the Phred-scaled
+    model probability P(TP).  Returns SkipResult while accumulating and
+    MultiResult when a full batch is ready.  Implements flush() for the
+    final partial batch.
+    """
+
+    def __init__(self, classifier_path, batch_size=64):
+        self.classifier_path = classifier_path
+        self.batch_size = batch_size
+        self.batch = []
+        self.booster = None
+        self._pd = None
+        self._train_features = None
+        self._categorical_columns = None
+        self._prob_to_phred = None
+
+    def _init_model(self):
+        import lightgbm as lgb
+        import pandas as pd
+        from dnaseq2seq.calling.train_classifier import (
+            TRAIN_FEATURES,
+            CATEGORICAL_COLUMNS,
+            _prob_to_phred,
+        )
+        self.booster = lgb.Booster(model_file=self.classifier_path)
+        self._pd = pd
+        self._train_features = TRAIN_FEATURES
+        self._categorical_columns = CATEGORICAL_COLUMNS
+        self._prob_to_phred = _prob_to_phred
+        logger.info(f"Classifier model loaded from {self.classifier_path}")
+
+    def __call__(self, record):
+        if self.booster is None:
+            self._init_model()
+
+        self.batch.append(record)
+        if len(self.batch) >= self.batch_size:
+            return self._predict_batch()
+        return stage.SkipResult()
+
+    def flush(self):
+        if self.batch:
+            records = self._predict_batch()
+            return stage.MultiResult(records)
+        else:
+            return stage.SkipResult()
+
+    def _predict_batch(self):
+        records = self.batch
+        self.batch = []
+
+        rows = [self._extract_features(rec) for rec in records]
+        feat_df = self._pd.DataFrame(rows, columns=sorted(self._train_features))
+
+        for col in self._categorical_columns & self._train_features:
+            if col in feat_df.columns:
+                feat_df[col] = feat_df[col].astype("category")
+
+        probas = self.booster.predict(feat_df)
+
+        for rec, prob in zip(records, probas):
+            # phred_qual = self._prob_to_phred(float(prob))
+            rec.qual = prob
+            if rec.vcf_line is not None:
+                parts = rec.vcf_line.rstrip("\n").split("\t")
+                parts[5] = f"{phred_qual:.4f}"
+                rec.vcf_line = "\t".join(parts) + "\n"
+
+        return records
+
+    @staticmethod
+    def _extract_features(rec):
+        """Extract classifier features from a VCFRecord dataclass."""
+        dp = 0
+        genotype = "het"
+        if rec.samples:
+            sample_data = next(iter(rec.samples.values()), {})
+            dp = sample_data.get("DP", 0) or 0
+            gt = sample_data.get("GT", None)
+            if gt and len(gt) >= 2:
+                alleles = [a for a in gt if a is not None]
+                if len(alleles) >= 2 and alleles[0] == alleles[1] and alleles[0] != 0:
+                    genotype = "hom"
+
+        def _scalar(key, default=0.0):
+            val = rec.info.get(key, default)
+            if isinstance(val, (tuple, list)):
+                return val[0] if val else default
+            return val
+
+        def _mean(key, default=0.0):
+            vals = rec.info.get(key, default)
+            if isinstance(vals, (tuple, list)):
+                return sum(vals) / len(vals) if vals else default
+            return float(vals)
+
+        def _min_val(key, default=0.0):
+            vals = rec.info.get(key, default)
+            if isinstance(vals, (tuple, list)):
+                return min(vals) if vals else default
+            return float(vals)
+
+        return {
+            "ref_len": len(rec.ref),
+            "alt_len": len(rec.alts[0]) if rec.alts else 0,
+            "genotype": genotype,
+            "qual": rec.qual if rec.qual is not None else 0.0,
+            "dp": dp,
+            "CALL_COUNT": _scalar("CALL_COUNT", 0),
+            "STEP_COUNT": _scalar("STEP_COUNT", 0),
+            "QUALS_mean": _mean("QUALS"),
+            "TNPRED_mean": _mean("TNPRED"),
+            "HAP0_REF_PRED_mean": _mean("HAP0_REF_PRED"),
+            "HAP1_REF_PRED_mean": _mean("HAP1_REF_PRED"),
+            "HAP0_HAP1_PRED_mean": _mean("HAP0_HAP1_PRED"),
+            "MIDPOINT_DEPTH_mean": _mean("MIDPOINT_DEPTH"),
+            "MIDPOINT_DEPTH_min": _min_val("MIDPOINT_DEPTH"),
+        }
 
 
 def add_ref_bases(encbases, reference, chrom, start, end, max_read_depth):
